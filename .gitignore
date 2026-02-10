@@ -1,0 +1,11 @@
+# Hidden Dir
+.env/
+
+# Dir
+/models/
+/__pycache__/
+/Resumes/
+
+# Files
+*Resume_preprocessed.txt
+*Resume_preprocessed_no_space.txt
