@@ -1,54 +1,19 @@
-# AI
 import json
 import os
 import pymupdf
-import sys
 import spacy
+import sys
 
 from spacy.matcher import Matcher
 
-class FileNotResumeError(Exception):
+class FileExceedsModelLimitError(Exception):
     pass
 
-def preprocess_for_extraction(text, nlp):
-    """
-    Preprocess text for skill/knowledge extraction using Context-Aware Casing:
-    - Preserves Acronyms (e.g., SQL, AWS).
-    - Preserves Proper Nouns (e.g., Python, Docker, Google).
-    - Lowercases common words (verbs, adjectives), even at the start of sentences.
-    """
-    print("Preprocessing text for extraction (Smart Casing)...")
-    
-    lines = text.split('\n')
-    processed_lines = []
-    
-    # Categories to preserve original casing
-    preserve_ent_types = ["ORG", "PRODUCT", "GPE", "PERSON", "NORP", "LANGUAGE"]
+class FileExceedsPageLimitError(Exception):
+    pass
 
-    for line in lines:
-        doc = nlp(line)
-        processed = ""
-        
-        for token in doc:
-            # RULE 1: Acronyms (Keep Uppercase)
-            # e.g., "API", "ML", "AWS"
-            if token.text.isupper() and len(token.text) > 1:
-                processed += token.text + token.whitespace_
-            
-            # RULE 2: Proper Nouns (Keep Title Case)
-            # e.g., "Python", "JavaScript", "React"
-            # We check if it is a Proper Noun (PROPN) OR falls into specific Entity types
-            elif token.pos_ == "PROPN" or token.ent_type_ in preserve_ent_types:
-                processed += token.text + token.whitespace_
-                
-            # RULE 3: Common Words (Lowercase)
-            # This handles standardizing bullet points: "Developed" -> "developed"
-            else:
-                processed += token.text.lower() + token.whitespace_
-        
-        processed_lines.append(processed.strip())
-
-    return '\n'.join(processed_lines)
+class FileNotResumeError(Exception):
+    pass
 
 def clean_and_save_text(text, nlp):
     """
@@ -56,20 +21,30 @@ def clean_and_save_text(text, nlp):
     """
     print("Preprocessing text (Cleaning & PII Removal) ...")
     
-    # Re-use patterns for cleaning
+    # Re-use patterns for cleaning (Philippine formats only)
+    # Covers all requested formats
     matcher = Matcher(nlp.vocab)
-    # Same patterns as detect_resume code, redefined here for scope
-    d_3   = {"IS_DIGIT": True, "LENGTH": 3}
-    d_4   = {"IS_DIGIT": True, "LENGTH": 4}
-    d_var = {"IS_DIGIT": True, "LENGTH": {">=": 1, "<=": 4}}
-    sep   = {"ORTH": {"IN": ["-", ".", "/"]}, "OP": "?"}
 
+    # Same patterns as detect_resume code, redefined here for scope
+    sep = {"ORTH": {"IN": ["-", " "]}, "OP": "?"}
+    digit_1 = {"IS_DIGIT": True, "LENGTH": 1}
+    digit_2 = {"IS_DIGIT": True, "LENGTH": 2}
+    digit_3 = {"IS_DIGIT": True, "LENGTH": 3}
+    digit_4 = {"IS_DIGIT": True, "LENGTH": 4}
+    digit_10 = {"IS_DIGIT": True, "LENGTH": 10}
+    digit_11 = {"IS_DIGIT": True, "LENGTH": 11}
+    
     phone_patterns = [
-        [{"ORTH": "("}, d_3, {"ORTH": ")"}, sep, d_3, sep, d_4],
-        [d_3, sep, d_3, sep, d_4],
-        [{"ORTH": "+"}, d_var, sep, d_var, sep, d_var, sep, {"IS_DIGIT": True, "LENGTH": {">=": 3, "<=": 9}}],
-        [{"ORTH": "+"}, d_var, sep, {"ORTH": "("}, d_3, {"ORTH": ")"}, sep, d_3, sep, d_4],
-        [{"IS_DIGIT": True, "LENGTH": {">=": 10, "<=": 15}}]
+        [digit_11],
+        [digit_4, sep, digit_3, sep, digit_4],
+        [{"ORTH": "+63"}, digit_10],
+        [{"ORTH": "+63"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
+        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
+        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_10],
+        [{"IS_DIGIT": True, "LENGTH": 2}, digit_10],
+        [{"IS_DIGIT": True, "LENGTH": 2}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
+        [{"ORTH": "("}, {"IS_DIGIT": True, "LENGTH": 2}, {"ORTH": ")"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
+        [{"ORTH": "("}, {"IS_DIGIT": True, "LENGTH": 2}, {"ORTH": ")"}, sep, digit_10]
     ]
     matcher.add("PHONE", phone_patterns)
 
@@ -108,89 +83,102 @@ def clean_and_save_text(text, nlp):
     # Join with newlines to preserve structure
     cleaned_text_with_structure = "\n".join(filtered_lines)
     
-    # Tokenize and Lowercase for final output (Restored behavior for Resume_preprocessed.txt)
+    # Tokenize and lowercase for final output
     print("Tokenizing and lowercasing ...")
     doc = nlp(cleaned_text_with_structure)
     cleaned_tokens = [token.text.lower() for token in doc if not token.is_space]
     cleaned_text = " ".join(cleaned_tokens)
 
-    # Apply Smart Casing preprocessing for extraction
+    # Apply smart casing preprocessing for extraction
     preprocessed_text = preprocess_for_extraction(cleaned_text_with_structure, nlp)
 
     # Save both versions
     output_dir = os.path.dirname(os.path.abspath(__file__))
     
-    # 1. Tokenized and Lowercased (Restored behavior)
-    output_path_original = os.path.join(output_dir, "Resume_preprocessed.txt")
-    with open(output_path_original, "w", encoding="utf-8") as f:
+    # 1. Tokenized and lowercased (restored behavior)
+    output_path_cleaned = os.path.join(output_dir, "Resume_cleaned.txt")
+    with open(output_path_cleaned, "w", encoding = "utf-8") as f:
         f.write(cleaned_text)
 
-    # 2. Preprocessed for extraction (Smart Casing applied)
-    output_path_preprocessed = os.path.join(output_dir, "Resume_preprocessed_no_space.txt")
-    with open(output_path_preprocessed, "w", encoding="utf-8") as f:
+    # 2. Preprocessed for extraction (smart casing applied)
+    output_path_for_extraction = os.path.join(output_dir, "Resume_for_extraction.txt")
+    with open(output_path_for_extraction, "w", encoding = "utf-8") as f:
         f.write(preprocessed_text)
         
-    print(f"Cleaned text (tokenized/lowercased) saved to: {output_path_original}")
-    print(f"Preprocessed text (Smart Casing) saved to: {output_path_preprocessed}")
+    print(f"Cleaned text (tokenized/lowercased) saved to: {output_path_cleaned}")
+    print(f"Preprocessed text (smart casing) saved to: {output_path_for_extraction}")
 
 def detect_resume(text, nlp):
     """
     Analyzes raw text to determine if it is a resume
     """
     print("Analyzing text for resume detection ...")
-    
-    if text is None:
-        return False
 
-    # Limit extremely long text to prevent spaCy memory errors
-    if len(text) > 1000000:
-        text = text[:1000000]
+    try:
+        if len(text) > 1000000:
+            raise FileExceedsModelLimitError
+    except FileExceedsModelLimitError:
+        error_response = {
+            "status" : "error",
+            "message": "Resume text exceeds spaCy model limit (1MB maximum).",
+            "code"   : 400
+        }
+        print(json.dumps(error_response))
+        sys.exit()
         
     doc = nlp(text)
 
     # STEP 1: Contact Info
     matcher = Matcher(nlp.vocab)
     
-    # ========== DEFINE PHONE NUMBER PATTERNS ==========
-    # These pattern components are reusable building blocks for matching phone number digits
-    # in various formats. They follow spaCy's token pattern syntax where each dict represents
-    # matching criteria for a single token.
+                                                        # Philippine mobile phone number patterns ONLY
+                                                        # Reusable components for flexible matching
+    sep      = {"ORTH": {"IN": ["-", " "]}, "OP": "?"}  # Optional separator: hyphen or space
+    digit_1  = {"IS_DIGIT": True, "LENGTH": 1}          # Single digit (e.g., 9)
+    digit_2  = {"IS_DIGIT": True, "LENGTH": 2}          # 2 digits (e.g., XX)
+    digit_3  = {"IS_DIGIT": True, "LENGTH": 3}          # 3 digits (e.g., XXX)
+    digit_4  = {"IS_DIGIT": True, "LENGTH": 4}          # 4 digits (e.g., XXXX or 09XX)
+    digit_10 = {"IS_DIGIT": True, "LENGTH": 10}         # 10 digits (9XXXXXXXXX)
+    digit_11 = {"IS_DIGIT": True, "LENGTH": 11}         # 11 digits (09XXXXXXXXX)
     
-    d_3   = {"IS_DIGIT": True, "LENGTH": 3}                   # Matches any token that: is purely digits AND has length of exactly 3
-    d_4   = {"IS_DIGIT": True, "LENGTH": 4}                   # Matches any token that: is purely digits AND has length of exactly 4
-    d_var = {"IS_DIGIT": True, "LENGTH": {">=": 1, "<=": 4}}  # Matches any token that: is purely digits AND length is between 1-4 digits
-    sep   = {"ORTH": {"IN": ["-", ".", "/"]}, "OP": "?"}      # Matches optional separator: hyphen (-), dot (.), or slash (/)
-                                                              # "OP": "?" means this pattern is optional (0 or 1 occurrence)
-
-    # Define multiple phone number patterns to catch various international and domestic formats
-    # Each sub-list represents a sequence of tokens that make up one phone format pattern
+    # Define Philippine phone number patterns
     phone_patterns = [
-        # Pattern 1: (123) 456-7890 - U.S. format with parentheses around area code
-        # Breakdown: "(" + 3-digits + ")" + optional-sep + 3-digits + optional-sep + 4-digits
-        [{"ORTH": "("}, d_3, {"ORTH": ")"}, sep, d_3, sep, d_4],
+        # Pattern 1: 09XXXXXXXXX - Local continuous (11 digits total)
+        [digit_11],
         
-        # Pattern 2: 123-456-7890 or 123.456.7890 - U.S. format without parentheses
-        # Breakdown: 3-digits + optional-sep + 3-digits + optional-sep + 4-digits
-        [d_3, sep, d_3, sep, d_4],
+        # Pattern 2: 09XX-XXX-XXXX or 09XX XXX XXXX - Local with flexible separators
+        [digit_4, sep, digit_3, sep, digit_4],
+
+        # Pattern 3: +639XXXXXXXXX - Continuous (no spaces/dashes)
+        [{"ORTH": "+63"}, digit_10],
         
-        # Pattern 3: +1-234-567-8901 - International format with country code
-        # Breakdown: "+" + 1-4-digits + optional-sep + 1-4-digits + optional-sep + 1-4-digits + optional-sep + 3-9-digits
-        [{"ORTH": "+"}, d_var, sep, d_var, sep, d_var, sep, {"IS_DIGIT": True, "LENGTH": {">=": 3, "<=": 9}}],
+        # Pattern 4: +63 9XX XXX XXXX or +63-9XX-XXX-XXXX - With flexible separators
+        [{"ORTH": "+63"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
         
-        # Pattern 4: +1(234)567-8901 - International format with country code and parentheses
-        # Breakdown: "+" + 1-4-digits + optional-sep + "(" + 3-digits + ")" + optional-sep + 3-digits + optional-sep + 4-digits
-        [{"ORTH": "+"}, d_var, sep, {"ORTH": "("}, d_3, {"ORTH": ")"}, sep, d_3, sep, d_4],
+        # Pattern 5: (+63) 9XX XXX XXXX - Parentheses + flexible separators
+        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
         
-        # Pattern 5: 10-15 digit continuous phone number (mobile/landline with varying formats worldwide)
-        # Some phone numbers are written as continuous digits without separators
-        [{"IS_DIGIT": True, "LENGTH": {">=": 10, "<=": 15}}]
+        # Pattern 6: (+63) 9XXXXXXXXX or (+63)-9XXXXXXXXX - Parentheses + continuous/dash
+        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_10],
+
+        # Pattern 7: 639XXXXXXXXX - Continuous (11 digits total: 63 + 9 + 8)
+        [{"IS_DIGIT": True, "LENGTH": 2}, digit_10],
+        
+        # Pattern 8: 63 9XX XXX XXXX or 63-9XX-XXX-XXXX - With flexible separators
+        [{"IS_DIGIT": True, "LENGTH": 2}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
+        
+        # Pattern 9: (63) 9XX XXX XXXX - Parentheses + flexible separators
+        [{"ORTH": "("}, {"IS_DIGIT": True, "LENGTH": 2}, {"ORTH": ")"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
+        
+        # Pattern 10: (63) 9XXXXXXXXX or (63)-9XXXXXXXXX - Parentheses + continuous/dash
+        [{"ORTH": "("}, {"IS_DIGIT": True, "LENGTH": 2}, {"ORTH": ")"}, sep, digit_10]
     ]
     
     # Register all phone patterns with the matcher under the label "PHONE"
     # The matcher will now search for these patterns in the text
     matcher.add("PHONE", phone_patterns)
     
-    # DETECT CONTACT INFO
+    # Step 2: Email Detection
     # Check for email addresses using spaCy's built-in email detection attribute
     # The like_email attribute recognizes standard email format (word@domain.extension)
     has_email = any(token.like_email for token in doc)
@@ -212,20 +200,39 @@ def detect_resume(text, nlp):
         [{"LOWER": {"IN": ["summary", "objective", "profile"]}}],
         [{"LOWER": "about"}, {"LOWER": "me"}],
         [{"LOWER": {"IN": ["projects", "portfolio", "certifications", "licenses", "awards", "achievements"]}}],
-        [{"LOWER": {"IN": ["references", "languages", "publications", "interests"]}}]
+        [{"LOWER": {"IN": ["references", "languages", "publications", "interests"]}}],
+        [{"LOWER": {"IN": ["volunteering", "volunteer", "volunteer experience", "community service"]}}],
+        [{"LOWER": {"IN": ["memberships", "professional memberships", "associations", "affiliations"]}}],
+        [{"LOWER": {"IN": ["training", "workshops", "professional development", "courses"]}}],
+        [{"LOWER": {"IN": ["patents", "publications", "research", "intellectual property"]}}],
+        [{"LOWER": {"IN": ["honors", "distinctions", "recognitions", "scholarships"]}}],
+        [{"LOWER": {"IN": ["internship", "internships", "practicum"]}}],
+        [{"LOWER": {"IN": ["core competencies", "key competencies", "core strengths"]}}],
+        [{"LOWER": {"IN": ["strengths", "personal strengths", "key strengths"]}}]
     ]
     header_matcher.add("RESUME_HEADER", header_patterns)
     
+    # Search the text for all resume section headers
     header_matches = header_matcher(doc)
+    
+    # Create a list to store the header keywords we find (without repeats)
     found_keywords = set()
+    
+    # Go through each match and save the header text
     for _, start, end in header_matches:
         found_keywords.add(doc[start:end].text.lower())
+    
+    # Count how many different headers we found
     keyword_count = len(found_keywords)
 
     # STEP 3: Entity Density
+    # Start with zero important items found
     entity_count    = 0
+    # List of important item types to look for (dates, companies, locations, people)
     relevant_labels = ["DATE", "ORG", "GPE", "PERSON"]
+    # Go through all important items detected in the text
     for ent in doc.ents:
+        # If this item is one of the types we care about, add it to our count
         if ent.label_ in relevant_labels:
             entity_count += 1
 
@@ -244,21 +251,37 @@ def extract_text_from_pdf(pdf_path):
     Extracts raw text from a PDF file
     """
     print(f"Reading resume PDF from: {pdf_path} ...")
+
     try:
         doc  = pymupdf.open(pdf_path)
+
+        num_pages = doc.page_count
+
+        if num_pages > 2:
+            raise FileExceedsPageLimitError
+
         text = "\n".join(page.get_text("text") for page in doc)
         doc.close()
         
         if not text.strip():
             raise ValueError
+    except FileExceedsPageLimitError:
+        error_response = {
+            "status" : "error",
+            "message": f"Resume PDF: {pdf_path}, exceeds page limit (2 pages maximum).",
+            "code"   : 300
+        }
+        print(json.dumps(error_response))
+        sys.exit()
     except ValueError:
         error_response = {
             "status" : "error",
             "message": f"Resume PDF: {pdf_path}, no text could be extracted.",
-            "code"   : 503
+            "code"   : 301
         }
         print(json.dumps(error_response))
         sys.exit()
+    print("Text extracted from PDF.")
 
     return text
 
@@ -266,14 +289,14 @@ def load_model():
     """
     Loads the spaCy model with error handling
     """
-    print("Loading spaCy model ... ")
+    print("Loading spaCy model ...")
     try:
         nlp = spacy.load("en_core_web_lg")
     except OSError:
         error_response = {
             "status" : "error",
             "message": "spaCy Model 'en_core_web_lg' Not Found.",
-            "code"   : 500
+            "code"   : 200
         }
         print(json.dumps(error_response))
         sys.exit()
@@ -281,11 +304,48 @@ def load_model():
         print("Model loaded.")
         return nlp
 
+def preprocess_for_extraction(text, nlp):
+    """
+    Preprocess text for skill/knowledge extraction using context-aware casing:
+    - Preserves Acronyms (e.g., SQL, AWS)
+    - Preserves Proper Nouns (e.g., Python, Docker, Google)
+    - Lowercases common words (verbs, adjectives), even at the start of sentences
+    """
+    print("Preprocessing text for extraction (Smart Casing)...")
+    
+    lines = text.split('\n')
+    processed_lines = []
+    
+    # Categories to preserve original casing
+    preserve_ent_types = ["ORG", "PRODUCT", "GPE", "PERSON", "NORP", "LANGUAGE"]
+
+    for line in lines:
+        doc = nlp(line)
+        processed = ""
+        
+        for token in doc:
+            # RULE 1: Acronyms (Keep Uppercase)
+            if token.text.isupper() and len(token.text) > 1:
+                processed += token.text + token.whitespace_
+            
+            # RULE 2: Proper Nouns (Keep Title Case)
+            elif token.pos_ == "PROPN" or token.ent_type_ in preserve_ent_types:
+                processed += token.text + token.whitespace_
+                
+            # RULE 3: Common Words (Lowercase)
+            else:
+                processed += token.text.lower() + token.whitespace_
+        
+        processed_lines.append(processed.strip())
+
+    return '\n'.join(processed_lines)
+
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     pdf_path   = os.path.join(script_dir, "Resumes/Resume_own.pdf")
 
     # STEP 1: Check File Existence
+    print("Checking if resume PDF exists ...")
     try:
         if not os.path.exists(pdf_path):
             raise FileNotFoundError
@@ -293,10 +353,11 @@ if __name__ == "__main__":
         error_response = {
             "status" : "error",
             "message": f"Resume PDF not found: {pdf_path}",
-            "code"   : 502
+            "code"   : 100
         }
         print(json.dumps(error_response))
         sys.exit()
+    print("Resume PDF found.")
 
     # STEP 2: Load Model
     nlp = load_model()
@@ -308,16 +369,14 @@ if __name__ == "__main__":
     try:
         if detect_resume(raw_text, nlp):
             print("This file is a resume.")
-        else:
-            raise FileNotResumeError
     except FileNotResumeError:
         error_response = {
             "status" : "error",
             "message": "This file is NOT a resume.",
-            "code"   : 400
+            "code"   : 101
         }
         print(json.dumps(error_response))
         sys.exit()
 
-    # STEP 5: Clean and Save (Only if it is a resume)
+    # STEP 5: Clean and Save
     clean_and_save_text(raw_text, nlp)

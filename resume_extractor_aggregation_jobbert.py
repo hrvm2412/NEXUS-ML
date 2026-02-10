@@ -202,9 +202,8 @@ def split_entities_by_separators(entities, original_text):
     return split_entities
 
 def clean_entity_text(text):
-    """Remove leading/trailing punctuation and parentheses. Replace hyphens and parentheses with spaces."""
-    # Replace hyphens (-), long hyphens (— and –), and parenthesis symbols with spaces
-    cleaned = text.replace('-', ' ').replace('—', ' ').replace('–', ' ').replace('(', ' ').replace(')', ' ').strip()
+    """Remove leading/trailing punctuation and parentheses."""
+    cleaned = text.strip()
     
     # Remove trailing punctuation and parentheses
     while cleaned and cleaned[-1] in ',.;:!?()[]{}':
@@ -214,12 +213,9 @@ def clean_entity_text(text):
     while cleaned and cleaned[0] in ',.;:!?()[]{}':
         cleaned = cleaned[1:].strip()
     
-    # Filter out if only punctuation or empty
+    # Filter out if only parentheses or empty
     if not cleaned or cleaned in ['(', ')', '()', '[]', '{}']:
         return ''
-    
-    # Clean up multiple spaces that may have been created by replacements
-    cleaned = ' '.join(cleaned.split())
     
     return cleaned
 
@@ -436,6 +432,12 @@ for window_start in range(0, len(lines), 1):  # Slide by 1 line each time
     
     # Combine lines with space separator and track line start positions
     combined_text = ' '.join(window_lines_text)
+    
+    # Preprocess combined_text: Replace hyphens, long hyphens, and parentheses with spaces
+    # This must be done BEFORE passing to extractors so model can recognize hyphenated words
+    combined_text = combined_text.replace('-', ' ').replace('—', ' ').replace('–', ' ').replace('(', ' ').replace(')', ' ')
+    # Clean up multiple spaces
+    combined_text = ' '.join(combined_text.split())
     
     # Calculate where each line starts in the combined text
     line_starts = [0]
