@@ -2,10 +2,13 @@
 .env/
 
 # Dir
-/models/
 /__pycache__/
+
+/Models/
 /Resumes/
 
 # Files
-*Resume_preprocessed.txt
-*Resume_preprocessed_no_space.txt
+*Resume_skills_knowledge.json
+
+*Resume_cleaned.txt
+*Resume_for_extraction.txt

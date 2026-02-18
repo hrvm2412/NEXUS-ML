@@ -1,10 +1,12 @@
+import csv
 import json
 import os
 import pymupdf
 import spacy
 import sys
 
-from spacy.matcher import Matcher
+from spacy.matcher import Matcher, PhraseMatcher
+from spacy.util import compile_infix_regex
 
 class FileExceedsModelLimitError(Exception):
     pass
@@ -15,92 +17,157 @@ class FileExceedsPageLimitError(Exception):
 class FileNotResumeError(Exception):
     pass
 
-def clean_and_save_text(text, nlp):
+class LineExceedsModelLimitError(Exception):
+    pass
+
+def clean_and_save_text(text, nlp_spacy):
     """
     Removes PII and saves the cleaned text
-    """
-    print("Preprocessing text (Cleaning & PII Removal) ...")
-    
-    # Re-use patterns for cleaning (Philippine formats only)
-    # Covers all requested formats
-    matcher = Matcher(nlp.vocab)
+    spaCy: Detects names (PERSON), email, URL, and phone patterns
+    CSVs: Locations (barangay, city, province, region) and zipcodes
 
-    # Same patterns as detect_resume code, redefined here for scope
-    sep = {"ORTH": {"IN": ["-", " "]}, "OP": "?"}
-    digit_1 = {"IS_DIGIT": True, "LENGTH": 1}
-    digit_2 = {"IS_DIGIT": True, "LENGTH": 2}
-    digit_3 = {"IS_DIGIT": True, "LENGTH": 3}
-    digit_4 = {"IS_DIGIT": True, "LENGTH": 4}
-    digit_10 = {"IS_DIGIT": True, "LENGTH": 10}
-    digit_11 = {"IS_DIGIT": True, "LENGTH": 11}
+    Preprocessing methods per detection type:
+    - Phone numbers   : No preprocessing
+    - Email / URL     : No preprocessing
+    - Phone prefixes  : No preprocessing
+    - Names (PERSON)  : No preprocessing
+    - Locations/Zip   : Exact whole-row match (case-insensitive) via PhraseMatcher
+                        Parentheses are treated as part of the location name
+
+    Also extracts emails and phone numbers (normalized to 09XXXXXXXXX)
+    as variables alongside redaction, reusing the same matcher pass
+    """
+
+    print("Preprocessing text (Cleaning & PII Removal) ...")
+
+    phil_loc_path      = os.path.join(os.path.dirname(__file__), "Phil_loc")
+    barangay_locations = load_locations_from_csv(os.path.join(phil_loc_path, "barangays.csv"))
+    city_locations     = load_locations_from_csv(os.path.join(phil_loc_path, "cities.csv"))
+    province_locations = load_locations_from_csv(os.path.join(phil_loc_path, "provinces.csv"))
+    region_locations   = load_locations_from_csv(os.path.join(phil_loc_path, "regions.csv"))
+    zipcode_locations  = load_locations_from_csv(os.path.join(phil_loc_path, "zipcodes_only.csv"))
     
-    phone_patterns = [
-        [digit_11],
-        [digit_4, sep, digit_3, sep, digit_4],
-        [{"ORTH": "+63"}, digit_10],
-        [{"ORTH": "+63"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
-        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
-        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_10],
-        [{"IS_DIGIT": True, "LENGTH": 2}, digit_10],
-        [{"IS_DIGIT": True, "LENGTH": 2}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
-        [{"ORTH": "("}, {"IS_DIGIT": True, "LENGTH": 2}, {"ORTH": ")"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
-        [{"ORTH": "("}, {"IS_DIGIT": True, "LENGTH": 2}, {"ORTH": ")"}, sep, digit_10]
-    ]
-    matcher.add("PHONE", phone_patterns)
+    locations = barangay_locations | city_locations | province_locations | region_locations | zipcode_locations
+    locations.add("philippines")
+
+    # PhraseMatcher for exact whole-row location matching (case-insensitive)
+    # Parentheses are preserved as part of the phrase (e.g., "Adams (Pob.)", "Region I (Ilocos Region)")
+    phrase_matcher = PhraseMatcher(nlp_spacy.vocab, attr="LOWER")
+    phrase_matcher.add("LOCATION", [nlp_spacy.make_doc(loc) for loc in locations])
+
+    # Matcher for Philippine phone number patterns
+    matcher = Matcher(nlp_spacy.vocab)
+
+    matcher.add("PHONE", get_phone_patterns())
+
+    # PII extraction accumulators
+    extracted_emails = []
+    extracted_phones = []
 
     lines          = text.split('\n')
     filtered_lines = []
 
     for line in lines:
-        doc_line = nlp(line)
+        try:
+            if len(line) > nlp_spacy.max_length:
+                raise LineExceedsModelLimitError
+        except LineExceedsModelLimitError:
+            error_response = {
+                "status" : "error",
+                "message": f"A line of text exceeds the spaCy model (en_core_web_lg) token limit and cannot be processed: '{line[:50]}'",
+                "code"   : 106
+            }
+            print(json.dumps(error_response))
+            sys.exit()
+
+        doc_spacy      = nlp_spacy(line)
         redact_indices = set()
 
-        # Matcher PII
-        matches = matcher(doc_line)
+        # 1. Matcher PII (Phone patterns) - No preprocessing
+        #    Reused for both redaction and extraction in the same pass
+        matches = matcher(doc_spacy)
         for match_id, start, end in matches:
             for i in range(start, end):
                 redact_indices.add(i)
 
-        # Token PII
-        for i, token in enumerate(doc_line):
-            if token.ent_type_ in ["PERSON", "GPE", "LOC", "FAC"]:
+            # Extract: normalize matched span and collect
+            raw_phone  = doc_spacy[start:end].text
+            normalized = normalize_phone(raw_phone)
+            if normalized and normalized not in extracted_phones:
+                extracted_phones.append(normalized)
+
+        # 2. Token PII from spaCy (email, URL, phone prefixes, names, locations, and zipcodes)
+        for i, token in enumerate(doc_spacy):
+            
+            # Emails and URLs
+            # Preprocessing: None
+            if token.like_email or token.like_url:
                 redact_indices.add(i)
-            elif token.like_email or token.like_url:
-                redact_indices.add(i)
+
+                # Extract: collect email (URLs are redacted but not collected)
+                if token.like_email:
+                    email = token.text.strip()
+                    if email and email not in extracted_emails:
+                        extracted_emails.append(email)
+
+            # Manual phone prefix check
+            # Preprocessing: None
             elif token.text.startswith('+') and any(c.isdigit() for c in token.text):
                 redact_indices.add(i)
+
+            # Name detection (PERSON)
+            # Preprocessing: None
+            elif token.ent_type_ == "PERSON":
+                redact_indices.add(i)
+
+        # 3. Location and zipcode detection via PhraseMatcher
+        #    Exact whole-row match (case-insensitive); parentheses are part of the phrase
+        loc_matches = phrase_matcher(doc_spacy)
+        for _, start, end in loc_matches:
+            for i in range(start, end):
+                redact_indices.add(i)
         
-        # Reconstruct
+        # 4. Remove phone-related punctuation around redacted tokens (parentheses, dashes, dots)
+        # This handles cases like "(+63)" or "918-744-2414" where punctuation is separate tokens
+        for i, token in enumerate(doc_spacy):
+            if i not in redact_indices and token.text in ['(', ')', '-', '.']:
+                # If surrounded by redacted tokens, redact the punctuation too
+                has_redacted_before = i > 0 and (i - 1) in redact_indices
+                has_redacted_after  = i < len(doc_spacy) - 1 and (i + 1) in redact_indices
+                if has_redacted_before or has_redacted_after:
+                    redact_indices.add(i)
+        
+        # Reconstruct - only add non-redacted tokens
         reconstructed_line = ""
-        for i, token in enumerate(doc_line):
-            if i in redact_indices:
-                reconstructed_line += "" + token.whitespace_
-            else:
+        for i, token in enumerate(doc_spacy):
+            if i not in redact_indices:
                 reconstructed_line += token.text + token.whitespace_
         
-        filtered_lines.append(reconstructed_line.strip())
+        # Clean up extra whitespace (handles multiple spaces from redaction)
+        reconstructed_line = " ".join(reconstructed_line.split())
+        filtered_lines.append(reconstructed_line)
 
     # Join with newlines to preserve structure
     cleaned_text_with_structure = "\n".join(filtered_lines)
     
     # Tokenize and lowercase for final output
-    print("Tokenizing and lowercasing ...")
-    doc = nlp(cleaned_text_with_structure)
+
+    doc = nlp_spacy(cleaned_text_with_structure)
     cleaned_tokens = [token.text.lower() for token in doc if not token.is_space]
     cleaned_text = " ".join(cleaned_tokens)
 
     # Apply smart casing preprocessing for extraction
-    preprocessed_text = preprocess_for_extraction(cleaned_text_with_structure, nlp)
+    preprocessed_text = preprocess_for_extraction(cleaned_text_with_structure, nlp_spacy)
 
     # Save both versions
     output_dir = os.path.dirname(os.path.abspath(__file__))
     
-    # 1. Tokenized and lowercased (restored behavior)
+    # 1. Tokenized and lowercased
     output_path_cleaned = os.path.join(output_dir, "Resume_cleaned.txt")
     with open(output_path_cleaned, "w", encoding = "utf-8") as f:
         f.write(cleaned_text)
 
-    # 2. Preprocessed for extraction (smart casing applied)
+    # 2. Preprocessed for extraction
     output_path_for_extraction = os.path.join(output_dir, "Resume_for_extraction.txt")
     with open(output_path_for_extraction, "w", encoding = "utf-8") as f:
         f.write(preprocessed_text)
@@ -108,10 +175,21 @@ def clean_and_save_text(text, nlp):
     print(f"Cleaned text (tokenized/lowercased) saved to: {output_path_cleaned}")
     print(f"Preprocessed text (smart casing) saved to: {output_path_for_extraction}")
 
+    return extracted_emails, extracted_phones
+
 def detect_resume(text, nlp):
     """
     Analyzes raw text to determine if it is a resume
+
+    Preprocessing methods per detection type:
+    - Phone numbers        : No preprocessing
+    - Email detection      : No preprocessing
+    - Headers              : No preprocessing
+    - Entity density       : No preprocessing
+    - Location/Zip density : Exact whole-row match (case-insensitive) via PhraseMatcher
+                             Parentheses are treated as part of the location name
     """
+
     print("Analyzing text for resume detection ...")
 
     try:
@@ -120,75 +198,42 @@ def detect_resume(text, nlp):
     except FileExceedsModelLimitError:
         error_response = {
             "status" : "error",
-            "message": "Resume text exceeds spaCy model limit (1MB maximum).",
-            "code"   : 400
+            "message": "Resume text exceeds spaCy model limit.",
+            "code"   : 104
         }
         print(json.dumps(error_response))
         sys.exit()
         
+    # Load CSV locations for entity density detection
+    phil_loc_path      = os.path.join(os.path.dirname(__file__), "Phil_loc")
+    barangay_locations = load_locations_from_csv(os.path.join(phil_loc_path, "barangays.csv"))
+    city_locations     = load_locations_from_csv(os.path.join(phil_loc_path, "cities.csv"))
+    province_locations = load_locations_from_csv(os.path.join(phil_loc_path, "provinces.csv"))
+    region_locations   = load_locations_from_csv(os.path.join(phil_loc_path, "regions.csv"))
+    zipcode_locations  = load_locations_from_csv(os.path.join(phil_loc_path, "zipcodes_only.csv"))
+    
+    locations = barangay_locations | city_locations | province_locations | region_locations | zipcode_locations
+    locations.add("philippines")
+    
+    # PhraseMatcher for exact whole-row location matching (case-insensitive)
+    # Parentheses are preserved as part of the phrase (e.g., "Adams (Pob.)", "Region I (Ilocos Region)")
+    phrase_matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+    phrase_matcher.add("LOCATION", [nlp.make_doc(loc) for loc in locations])
+
     doc = nlp(text)
 
-    # STEP 1: Contact Info
+    # STEP 1: Contact Info - No preprocessing
     matcher = Matcher(nlp.vocab)
     
-                                                        # Philippine mobile phone number patterns ONLY
-                                                        # Reusable components for flexible matching
-    sep      = {"ORTH": {"IN": ["-", " "]}, "OP": "?"}  # Optional separator: hyphen or space
-    digit_1  = {"IS_DIGIT": True, "LENGTH": 1}          # Single digit (e.g., 9)
-    digit_2  = {"IS_DIGIT": True, "LENGTH": 2}          # 2 digits (e.g., XX)
-    digit_3  = {"IS_DIGIT": True, "LENGTH": 3}          # 3 digits (e.g., XXX)
-    digit_4  = {"IS_DIGIT": True, "LENGTH": 4}          # 4 digits (e.g., XXXX or 09XX)
-    digit_10 = {"IS_DIGIT": True, "LENGTH": 10}         # 10 digits (9XXXXXXXXX)
-    digit_11 = {"IS_DIGIT": True, "LENGTH": 11}         # 11 digits (09XXXXXXXXX)
-    
-    # Define Philippine phone number patterns
-    phone_patterns = [
-        # Pattern 1: 09XXXXXXXXX - Local continuous (11 digits total)
-        [digit_11],
-        
-        # Pattern 2: 09XX-XXX-XXXX or 09XX XXX XXXX - Local with flexible separators
-        [digit_4, sep, digit_3, sep, digit_4],
-
-        # Pattern 3: +639XXXXXXXXX - Continuous (no spaces/dashes)
-        [{"ORTH": "+63"}, digit_10],
-        
-        # Pattern 4: +63 9XX XXX XXXX or +63-9XX-XXX-XXXX - With flexible separators
-        [{"ORTH": "+63"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
-        
-        # Pattern 5: (+63) 9XX XXX XXXX - Parentheses + flexible separators
-        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
-        
-        # Pattern 6: (+63) 9XXXXXXXXX or (+63)-9XXXXXXXXX - Parentheses + continuous/dash
-        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_10],
-
-        # Pattern 7: 639XXXXXXXXX - Continuous (11 digits total: 63 + 9 + 8)
-        [{"IS_DIGIT": True, "LENGTH": 2}, digit_10],
-        
-        # Pattern 8: 63 9XX XXX XXXX or 63-9XX-XXX-XXXX - With flexible separators
-        [{"IS_DIGIT": True, "LENGTH": 2}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
-        
-        # Pattern 9: (63) 9XX XXX XXXX - Parentheses + flexible separators
-        [{"ORTH": "("}, {"IS_DIGIT": True, "LENGTH": 2}, {"ORTH": ")"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
-        
-        # Pattern 10: (63) 9XXXXXXXXX or (63)-9XXXXXXXXX - Parentheses + continuous/dash
-        [{"ORTH": "("}, {"IS_DIGIT": True, "LENGTH": 2}, {"ORTH": ")"}, sep, digit_10]
-    ]
-    
     # Register all phone patterns with the matcher under the label "PHONE"
-    # The matcher will now search for these patterns in the text
-    matcher.add("PHONE", phone_patterns)
+    matcher.add("PHONE", get_phone_patterns())
     
-    # Step 2: Email Detection
-    # Check for email addresses using spaCy's built-in email detection attribute
-    # The like_email attribute recognizes standard email format (word@domain.extension)
-    has_email = any(token.like_email for token in doc)
-    
-    # Check for phone numbers by running the matcher against the document
-    # If matcher finds any matches, has_phone will be True
-    # len(matcher(doc)) > 0 means: "if there's at least one phone number match, it's a resume signal"
     has_phone = len(matcher(doc)) > 0
 
-    # STEP 2: Headers
+    # STEP 2: Email Detection - No preprocessing
+    has_email = any(token.like_email for token in doc)
+    
+    # STEP 3: Headers - No preprocessing
     header_matcher  = Matcher(nlp.vocab)
     header_patterns = [
         [{"LOWER": {"IN": ["education", "academics", "qualifications"]}}],
@@ -208,14 +253,13 @@ def detect_resume(text, nlp):
         [{"LOWER": {"IN": ["honors", "distinctions", "recognitions", "scholarships"]}}],
         [{"LOWER": {"IN": ["internship", "internships", "practicum"]}}],
         [{"LOWER": {"IN": ["core competencies", "key competencies", "core strengths"]}}],
-        [{"LOWER": {"IN": ["strengths", "personal strengths", "key strengths"]}}]
-    ]
+        [{"LOWER": {"IN": ["strengths", "personal strengths", "key strengths"]}}]]
     header_matcher.add("RESUME_HEADER", header_patterns)
     
     # Search the text for all resume section headers
     header_matches = header_matcher(doc)
     
-    # Create a list to store the header keywords we find (without repeats)
+    # Create a set to store the header keywords we find (without repeats)
     found_keywords = set()
     
     # Go through each match and save the header text
@@ -225,16 +269,18 @@ def detect_resume(text, nlp):
     # Count how many different headers we found
     keyword_count = len(found_keywords)
 
-    # STEP 3: Entity Density
-    # Start with zero important items found
+    # STEP 4: Entity Density - Only locations and zipcodes are preprocessed
     entity_count    = 0
-    # List of important item types to look for (dates, companies, locations, people)
-    relevant_labels = ["DATE", "ORG", "GPE", "PERSON"]
-    # Go through all important items detected in the text
+    relevant_labels = ["DATE", "ORG", "PERSON"]
+    
+    # Count spaCy entities (DATE, ORG, PERSON)
     for ent in doc.ents:
-        # If this item is one of the types we care about, add it to our count
         if ent.label_ in relevant_labels:
             entity_count += 1
+    
+    # Count CSV-based location and zipcode entities via exact PhraseMatcher
+    loc_matches = phrase_matcher(doc)
+    entity_count += len(loc_matches)
 
     # Scoring
     score = 0
@@ -244,6 +290,7 @@ def detect_resume(text, nlp):
     if entity_count > 5: score += 1
 
     threshold = 4
+    
     return score >= threshold
 
 def extract_text_from_pdf(pdf_path):
@@ -254,7 +301,6 @@ def extract_text_from_pdf(pdf_path):
 
     try:
         doc  = pymupdf.open(pdf_path)
-
         num_pages = doc.page_count
 
         if num_pages > 2:
@@ -269,7 +315,7 @@ def extract_text_from_pdf(pdf_path):
         error_response = {
             "status" : "error",
             "message": f"Resume PDF: {pdf_path}, exceeds page limit (2 pages maximum).",
-            "code"   : 300
+            "code"   : 102
         }
         print(json.dumps(error_response))
         sys.exit()
@@ -277,41 +323,149 @@ def extract_text_from_pdf(pdf_path):
         error_response = {
             "status" : "error",
             "message": f"Resume PDF: {pdf_path}, no text could be extracted.",
-            "code"   : 301
+            "code"   : 103
         }
         print(json.dumps(error_response))
         sys.exit()
+
     print("Text extracted from PDF.")
 
     return text
 
+def get_phone_patterns():
+    """Returns the shared list of Philippine phone number patterns for Matcher"""
+    sep      = {"ORTH": {"IN": ["-", " "]}, "OP": "?"}
+    digit_1  = {"IS_DIGIT": True, "LENGTH": 1}
+    digit_2  = {"IS_DIGIT": True, "LENGTH": 2}
+    digit_3  = {"IS_DIGIT": True, "LENGTH": 3}
+    digit_4  = {"IS_DIGIT": True, "LENGTH": 4}
+    digit_9  = {"IS_DIGIT": True, "LENGTH": 9}
+    digit_11 = {"IS_DIGIT": True, "LENGTH": 11}
+    
+    return [
+        # Format: 09XXXXXXXXX (11 digits as single token)
+        [digit_11],
+        
+        # Format: 09XX-XXX-XXXX or 09XX XXX XXXX
+        [{"ORTH": "0"}, digit_1, digit_2, sep, digit_3, sep, digit_4],
+        
+        # Format: 0XXX-XXX-XXXX (e.g., 0917-744-2414 where 0917 is one token)
+        [digit_4, sep, digit_3, sep, digit_4],
+
+        # Format: 09-XXXXXXXXX or 09 XXXXXXXXX
+        [{"ORTH": "0"}, digit_1, sep, digit_9],
+        
+        # Format: +639XXXXXXXXX
+        [{"ORTH": "+63"}, digit_1, digit_9],
+        
+        # Format: +63-9XX-XXX-XXXX or +63 9XX XXX XXXX (digit_1 + digit_2 variant)
+        [{"ORTH": "+63"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
+        
+        # Format: +63-9XX-XXX-XXXX or +63 9XX-XXX-XXXX (3-digit prefix variant)
+        [{"ORTH": "+63"}, sep, digit_3, sep, digit_3, sep, digit_4],
+        
+        # Format: +63-9XXXXXXXXX or +63 9XXXXXXXXX
+        [{"ORTH": "+63"}, sep, digit_1, digit_9],
+        
+        # Format: 639XXXXXXXXX
+        [{"ORTH": "63"}, digit_1, digit_9],
+        
+        # Format: 63-9XX-XXX-XXXX or 63 9XX XXX XXXX (digit_1 + digit_2 variant)
+        [{"ORTH": "63"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
+        
+        # Format: 63-9XX-XXX-XXXX or 63 9XX-XXX-XXXX (3-digit prefix variant)
+        [{"ORTH": "63"}, sep, digit_3, sep, digit_3, sep, digit_4],
+        
+        # Format: 63-9XXXXXXXXX or 63 9XXXXXXXXX
+        [{"ORTH": "63"}, sep, digit_1, digit_9],
+        
+        # Format: (+63)9XXXXXXXXX or (+63)-9XXXXXXXXX or (+63) 9XXXXXXXXX
+        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_1, digit_9],
+        
+        # Format: (+63)9XX-XXX-XXXX or (+63)-9XX-XXX-XXXX (digit_1 + digit_2 variant)
+        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_1, digit_2, sep, digit_3, sep, digit_4],
+        
+        # Format: (+63) 9XX-XXX-XXXX where 9XX is a single 3-digit token
+        [{"ORTH": "("}, {"ORTH": "+63"}, {"ORTH": ")"}, sep, digit_3, sep, digit_3, sep, digit_4],
+    ]
+
+def load_locations_from_csv(file_path):
+    """
+    Loads locations and zipcodes from CSV file as exact whole-row strings.
+    Parentheses are preserved as part of the location name
+    (e.g., "Adams (Pob.)", "Region I (Ilocos Region)")
+    Works for barangays.csv, cities.csv, provinces.csv, regions.csv, and zipcodes_only.csv
+    """
+    locations = set()
+    with open(file_path, 'r', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        next(reader)  # Skip header row
+        for row in reader:
+            if not row: continue
+            text = row[0].strip()
+            if text:
+                locations.add(text.lower())
+    return locations
+
 def load_model():
     """
-    Loads the spaCy model with error handling
+    Loads the spaCy model
+    spaCy: For general English NLP tasks (email, URL, phone patterns, and NER)
     """
-    print("Loading spaCy model ...")
+
+    print("Loading spaCy model (en_core_web_lg) ...")
+
     try:
-        nlp = spacy.load("en_core_web_lg")
+        nlp_spacy = spacy.load("en_core_web_lg")
     except OSError:
         error_response = {
             "status" : "error",
-            "message": "spaCy Model 'en_core_web_lg' Not Found.",
-            "code"   : 200
+            "message": "spaCy model 'en_core_web_lg' not found.",
+            "code"   : 101
         }
         print(json.dumps(error_response))
         sys.exit()
     else:
-        print("Model loaded.")
-        return nlp
+        print("spaCy model loaded.")
+
+    # FIX: Remove the '/' infix splitting rule from the tokenizer
+    modified_infixes = [p for p in nlp_spacy.Defaults.infixes if '/' not in p]
+    nlp_spacy.tokenizer.infix_finditer = compile_infix_regex(modified_infixes).finditer
+
+    print("Tokenizer updated: Slash-separated terms will be kept as single tokens.")
+    
+    return nlp_spacy
+
+def normalize_phone(raw_phone):
+    """
+    Normalizes a Philippine phone number (in any supported format) to 09XXXXXXXXX
+
+    Strips all non-digit characters from the matched span, then converts:
+      - 639XXXXXXXXX  (12 digits, country code without +) to 09XXXXXXXXX
+      - 9XXXXXXXXX    (10 digits, no leading 0)           to 09XXXXXXXXX
+      - 09XXXXXXXXX   (11 digits, already local format)   to unchanged
+
+    Returns the normalized 11-digit string, or None if the result is invalid
+    """
+    digits = ''.join(c for c in raw_phone if c.isdigit())
+
+    if digits.startswith("63") and len(digits) == 12:
+        digits = "0" + digits[2:]
+    elif digits.startswith("9") and len(digits) == 10:
+        digits = "0" + digits
+
+    if len(digits) == 11 and digits.startswith("09"):
+        return digits
+    return None
 
 def preprocess_for_extraction(text, nlp):
     """
     Preprocess text for skill/knowledge extraction using context-aware casing:
-    - Preserves Acronyms (e.g., SQL, AWS)
-    - Preserves Proper Nouns (e.g., Python, Docker, Google)
+    - Preserves Acronyms (e.g. SQL, AWS, C/C++)
+    - Preserves Proper Nouns (e.g. Python, Docker, Google)
     - Lowercases common words (verbs, adjectives), even at the start of sentences
     """
-    print("Preprocessing text for extraction (Smart Casing)...")
+    print("Preprocessing text for extraction (Smart Casing) ...")
     
     lines = text.split('\n')
     processed_lines = []
@@ -324,15 +478,15 @@ def preprocess_for_extraction(text, nlp):
         processed = ""
         
         for token in doc:
-            # RULE 1: Acronyms (Keep Uppercase)
+            # RULE 1: Acronyms
             if token.text.isupper() and len(token.text) > 1:
                 processed += token.text + token.whitespace_
             
-            # RULE 2: Proper Nouns (Keep Title Case)
+            # RULE 2: Proper Nouns
             elif token.pos_ == "PROPN" or token.ent_type_ in preserve_ent_types:
                 processed += token.text + token.whitespace_
                 
-            # RULE 3: Common Words (Lowercase)
+            # RULE 3: Common Words
             else:
                 processed += token.text.lower() + token.whitespace_
         
@@ -360,23 +514,28 @@ if __name__ == "__main__":
     print("Resume PDF found.")
 
     # STEP 2: Load Model
-    nlp = load_model()
+    nlp_spacy = load_model()
 
     # STEP 3: Extract Text
     raw_text = extract_text_from_pdf(pdf_path)
 
     # STEP 4: Detect Resume
     try:
-        if detect_resume(raw_text, nlp):
+        if detect_resume(raw_text, nlp_spacy):
             print("This file is a resume.")
+        else:
+            raise FileNotResumeError
     except FileNotResumeError:
         error_response = {
             "status" : "error",
             "message": "This file is NOT a resume.",
-            "code"   : 101
+            "code"   : 105
         }
         print(json.dumps(error_response))
         sys.exit()
 
-    # STEP 5: Clean and Save
-    clean_and_save_text(raw_text, nlp)
+    # STEP 5: Clean, Save, and Extract PII in one pass
+    extracted_emails, extracted_phones = clean_and_save_text(raw_text, nlp_spacy)
+
+    print(f"Extracted emails: {extracted_emails}")
+    print(f"Extracted phones: {extracted_phones}")
