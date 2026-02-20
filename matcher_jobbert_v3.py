@@ -1,12 +1,24 @@
 import torch
 import numpy as np
-from tqdm.auto import tqdm
+
+from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import batch_to_device, cos_sim
-
+from tqdm.auto import tqdm
 
 # Load the model
-model = SentenceTransformer("TechWolf/JobBERT-v3")
+MODEL_ID         = "TechWolf/JobBERT-v3"
+LOCAL_MODEL_PATH = Path("models/JobBERT-v3")
+DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
+
+def load_model(model_id: str, local_path: Path, device: str) -> SentenceTransformer:
+    if local_path.exists():
+        return SentenceTransformer(str(local_path), device = device)
+    
+    local_path.mkdir(parents = True, exist_ok = True)
+    loaded_model = SentenceTransformer(model_id, device=device)
+    loaded_model.save(str(local_path))
+    return loaded_model
 
 def encode_batch(jobbert_model, texts, text_key: str = "anchor"):
     features = jobbert_model.tokenize(texts)
@@ -50,6 +62,9 @@ def find_top_matches(query_title: str, candidate_titles: list, top_k: int = 3):
     return [(candidate_titles[i], round(scores[i].item(), 4)) for i in top_indices]
 
 if __name__ == "__main__":
+
+    model = load_model(MODEL_ID, LOCAL_MODEL_PATH, DEVICE)
+
     # --- Similarity Matrix Demo ---
     job_titles = [
         "Software Engineer",
