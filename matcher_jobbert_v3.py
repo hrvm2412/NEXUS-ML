@@ -18,7 +18,6 @@ def encode_batch(jobbert_model, texts, text_key: str = "anchor"):
 
     return out_features["sentence_embedding"].cpu().numpy()
 
-
 def encode(jobbert_model, texts, batch_size: int = 8, text_key: str = "anchor"):
     # Sort texts by length and keep track of original indices
     sorted_indices = np.argsort([len(text) for text in texts])
@@ -37,7 +36,6 @@ def encode(jobbert_model, texts, batch_size: int = 8, text_key: str = "anchor"):
 
     return sorted_embeddings[original_order]
 
-
 def find_top_matches(query_title: str, candidate_titles: list, top_k: int = 3):
     """Find the top-k most similar job titles to a given query."""
     all_titles = [query_title] + candidate_titles
@@ -50,7 +48,6 @@ def find_top_matches(query_title: str, candidate_titles: list, top_k: int = 3):
     top_indices = torch.argsort(scores, descending=True)[:top_k]
 
     return [(candidate_titles[i], round(scores[i].item(), 4)) for i in top_indices]
-
 
 if __name__ == "__main__":
     # --- Similarity Matrix Demo ---
