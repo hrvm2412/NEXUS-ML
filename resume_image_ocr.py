@@ -1,12 +1,17 @@
+import cv2
 import json
+import numpy as np
 import os
 import pymupdf
 import shutil
 import spacy
 import sys
+import tempfile
 
 from resume_text_detector_cleaner import clean_and_save_text, detect_resume, FileNotResumeError
 from spacy.util import compile_infix_regex
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 
 def ensure_tesseract_installed():
     """
@@ -21,10 +26,128 @@ def ensure_tesseract_installed():
     error_response = {
         "status" : "error",
         "message": "Tesseract is not installed. Please install it manually: https://github.com/tesseract-ocr/tesseract",
-        "code"   : 203
+        "code"   : 202
     }
     print(json.dumps(error_response))
     sys.exit()
+
+def preprocess_image_document_filter(file_path):
+    """
+    1. Resize      — enforce 1800–4000 px on longest side, aspect ratio preserved
+    2. Grayscale   — reduce to single luminance channel
+    3. Denoise     — remove scan grain / camera noise
+    4. Deskew      — detect and correct text rotation via Hough lines
+    5. Binarize    — adaptive Gaussian threshold for uneven lighting
+
+    Returns the path to a cleaned temp PNG file
+    The caller is responsible for deleting it after use
+    """
+    print(f"Preprocessing image with document filter: {file_path} ...")
+
+    img = cv2.imread(file_path)
+    if img is None:
+        error_response = {
+            "status" : "error",
+            "message": f"OpenCV could not read image: {file_path}",
+            "code"   : 203
+        }
+        print(json.dumps(error_response))
+        sys.exit()
+
+    # 1. Resize
+    # 1800 px floor: minimum for reliable Tesseract OCR (~150 DPI equivalent on A4)
+    # 4000 px ceiling: prevents excessive memory use during denoising / thresholding
+    # Dimensions shrink/grow by the same ratio
+    min_side = 1800
+    max_side = 4000
+    h, w     = img.shape[:2]
+    longest  = max(h, w)
+
+    if longest < min_side:
+        scale         = min_side / longest          # upscale
+        interpolation = cv2.INTER_CUBIC             # preserves sharpness when enlarging
+        reason        = "upscaled (too small for OCR)"
+    elif longest > max_side:
+        scale         = max_side / longest          # downscale
+        interpolation = cv2.INTER_AREA              # best quality when shrinking
+        reason        = "downscaled (too large)"
+    else:
+        scale         = None                        # already in the acceptable range
+
+    if scale is not None:
+        # Derive both dimensions from the original aspect ratio (w / h)
+        # Fixing the longest side to its target value and computing the other
+        # from the original ratio avoids the independent int() truncation that
+        # would occur if both were scaled separately — keeping the ratio exact
+        if w >= h:                          # Landscape or square: width is longest
+            new_w = int(w * scale)
+            new_h = int(new_w * h / w)     # height derived from original ratio
+        else:                               # portrait: height is longest
+            new_h = int(h * scale)
+            new_w = int(new_h * w / h)     # width derived from original ratio
+        img = cv2.resize(img, (new_w, new_h), interpolation = interpolation)
+        print(f"Resized image: {w}x{h} to {new_w}x{new_h} ({reason}, scale = {scale:.3f})")
+    else:
+        print(f"Image size {w}x{h} is within acceptable range, no resize needed.")
+
+    # 2. Grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # 3. Denoise
+    # h = 10: filter strength; templateWindowSize = 7, searchWindowSize = 21 are standard
+    denoised = cv2.fastNlMeansDenoising(gray, h = 10, templateWindowSize = 7, searchWindowSize = 21)
+
+    # 4. Deskew via Hough line detection
+    # Edge to Hough lines to median angle to affine rotation
+    edges = cv2.Canny(denoised, threshold1 = 50, threshold2 = 150, apertureSize = 3)
+    lines = cv2.HoughLinesP(
+        edges, rho = 1, theta = np.pi / 180, threshold = 100,
+        minLineLength = 100, maxLineGap = 10
+        )
+    if lines is not None:
+        angles = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            if x2 != x1:                              # avoid division by zero
+                angles.append(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+
+        if angles:
+            # Keep only near-horizontal lines (±15°) to avoid false skew from
+            # vertical separators or diagonal decorative elements
+            horizontal = [a for a in angles if abs(a) < 15]
+            skew_angle  = float(np.median(horizontal)) if horizontal else 0.0
+
+            if abs(skew_angle) > 0.3:               # ignore sub-pixel tilts
+                print(f"Deskewing: correcting {skew_angle:.2f}° rotation ...")
+                (ch, cw)   = denoised.shape
+                center     = (cw // 2, ch // 2)
+                rot_matrix = cv2.getRotationMatrix2D(center, skew_angle, scale=1.0)
+                denoised   = cv2.warpAffine(
+                    denoised, rot_matrix, (cw, ch),
+                    flags      = cv2.INTER_CUBIC,
+                    borderMode = cv2.BORDER_REPLICATE   # fill borders with edge pixels
+                )
+
+    # 5. Adaptive threshold (document binarization)
+    # Gaussian-weighted neighbourhood handles shadows and uneven scan lighting,
+    # blockSize = 31: Large enough for gradual lighting gradients
+    # C = 15: Constant subtracted from the weighted mean
+    binarized = cv2.adaptiveThreshold(
+        denoised, maxValue = 255,
+        adaptiveMethod = cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        thresholdType  = cv2.THRESH_BINARY,
+        blockSize      = 31,
+        C              = 15
+    )
+
+    # 6. Save to a named temp PNG
+    tmp_file = tempfile.NamedTemporaryFile(suffix = ".png", delete = False)
+    tmp_path = tmp_file.name
+    tmp_file.close()
+
+    cv2.imwrite(tmp_path, binarized)
+    print(f"Preprocessed image saved to temp file: {tmp_path}")
+    return tmp_path
 
 def extract_text_from_image_ocr(file_path):
     """
@@ -44,9 +167,18 @@ def extract_text_from_image_ocr(file_path):
 
     print(f"Reading file for OCR: {file_path} ...")
 
+    # Preprocess image files with the document filter before OCR
+    tmp_path = None
+    ext      = os.path.splitext(file_path)[1].lower()
+    if ext in IMAGE_EXTENSIONS:
+        tmp_path  = preprocess_image_document_filter(file_path)
+        ocr_path  = tmp_path
+    else:
+        ocr_path  = file_path
+
     full_text = ""
     try:
-        doc = pymupdf.open(file_path)
+        doc = pymupdf.open(ocr_path)
         print("Performing OCR extraction (this requires Tesseract installed) ...")
 
         for i, page in enumerate(doc):
@@ -82,6 +214,11 @@ def extract_text_from_image_ocr(file_path):
         }
         print(json.dumps(error_response))
         sys.exit()
+    finally:
+        # Clean up preprocessed temp file if one was created
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+            print("Temp preprocessed image removed.")
 
     if not full_text.strip():
         error_response = {
@@ -110,7 +247,7 @@ def load_model():
         error_response = {
             "status" : "error",
             "message": "spaCy Model 'en_core_web_lg' Not Found.",
-            "code"   : 202
+            "code"   : 201
         }
         print(json.dumps(error_response))
         sys.exit()
@@ -160,7 +297,7 @@ if __name__ == "__main__":
         error_response = {
             "status" : "error",
             "message": "This file is NOT a resume.",
-            "code"   : 201
+            "code"   : 207
         }
         print(json.dumps(error_response))
         sys.exit()
