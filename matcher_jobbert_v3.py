@@ -8,7 +8,6 @@ from sentence_transformers.util import batch_to_device, cos_sim
 # Load the model
 model = SentenceTransformer("TechWolf/JobBERT-v3")
 
-
 def encode_batch(jobbert_model, texts, text_key: str = "anchor"):
     features = jobbert_model.tokenize(texts)
     features = batch_to_device(features, jobbert_model.device)
