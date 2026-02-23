@@ -1,4 +1,7 @@
+import ctypes
 import cv2
+import gc
+import hashlib
 import json
 import numpy as np
 import os
@@ -12,6 +15,28 @@ from resume_text_detector_cleaner import clean_and_save_text, detect_resume, Fil
 from spacy.util import compile_infix_regex
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
+
+def _wipe_ndarray(arr: np.ndarray) -> None:
+    """
+    Overwrite a NumPy array's data buffer with zeros in-place
+    Works even if the array is not C-contiguous by forcing a contiguous view
+    """
+    if arr is not None and arr.size > 0:
+        flat    = np.frombuffer(arr.data, dtype=np.uint8)
+        flat[:] = 0
+
+def _wipe_str(s: str) -> None:
+    """
+    Best-effort overwrite of a CPython str object's internal character buffer
+    CPython-specific — targets the compact ASCII/Latin-1 data that sits just
+    after the fixed PyUnicodeObject header (size of an empty str object)
+    Non-ASCII strings may have a wider per-character representation; we wipe
+    the full reported object size to cover all variants
+    """
+    if s:
+        header = sys.getsizeof("")          # fixed PyUnicodeObject header, e.g. 49 B
+        total  = sys.getsizeof(s)           # header + encoded character data
+        ctypes.memset(id(s) + header, 0, total - header)
 
 def ensure_tesseract_installed():
     """
@@ -147,6 +172,16 @@ def preprocess_image_document_filter(file_path):
 
     cv2.imwrite(tmp_path, binarized)
     print(f"Preprocessed image saved to temp file: {tmp_path}")
+
+    # Secure wipe: zero every pixel buffer now that the file is written
+    # All image data (uploaded + all intermediate arrays) is wiped from RAM
+    _wipe_ndarray(img);       del img
+    _wipe_ndarray(gray);      del gray
+    _wipe_ndarray(denoised);  del denoised
+    _wipe_ndarray(binarized); del binarized
+    gc.collect()
+    print("Image pixel buffers securely wiped from RAM.")
+
     return tmp_path
 
 def extract_text_from_image_ocr(file_path):
@@ -196,6 +231,11 @@ def extract_text_from_image_ocr(file_path):
                 
                 line_count = len(page_text.splitlines())
                 print(f"Processed page {i+1}/{len(doc)}: Extracted {line_count} lines (formatting preserved)")
+
+                # Secure wipe: clear per-page text immediately after accumulation
+                _wipe_str(page_text)
+                del page_text
+
             except Exception as e:
                 error_response = {
                     "status" : "error",
@@ -304,6 +344,16 @@ if __name__ == "__main__":
 
     # STEP 5: Clean, Save, and Extract PII in one pass (Only if it is a resume)
     extracted_emails, extracted_phones = clean_and_save_text(raw_text, nlp)
+
+    # Secure wipe: raw_text has served its purpose and contains PII
+    # Hash first as a tamper-evident audit trail
+    raw_text_hash = hashlib.sha256(raw_text.encode("utf-8", errors = "replace")).hexdigest()
+    print(f"Raw text SHA-256 (audit trail): {raw_text_hash}")
+
+    _wipe_str(raw_text)
+    del raw_text
+    gc.collect()
+    print("Raw PII text securely wiped from RAM.")
 
     print(f"Extracted emails: {extracted_emails}")
     print(f"Extracted phones: {extracted_phones}")

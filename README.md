@@ -25,3 +25,6 @@ python -m venv .env
 # 3. Install dependencies
 pip install -r requirements.txt
 ```
+
+## Updated Usage
+

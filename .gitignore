@@ -4,14 +4,12 @@
 # Dir
 /__pycache__/
 
+/Extracted_skills_knowledge/
 /Models/
 /ONET_input/
+/Profile_text/
 /Resumes/
+/Resume_text/
 
 # Files
-*Resume_skills_knowledge.json
-
-*Resume_cleaned.txt
-*Resume_for_extraction.txt
-
 *ONET_resume_skills_extractor.py

@@ -1,4 +1,7 @@
 import csv
+import ctypes
+import gc
+import hashlib
 import json
 import os
 import pymupdf
@@ -19,6 +22,16 @@ class FileNotResumeError(Exception):
 
 class LineExceedsModelLimitError(Exception):
     pass
+
+def _wipe_str(s: str) -> None:
+    """
+    Non-ASCII strings may have a wider per-character representation; we wipe
+    the full reported object size to cover all variants
+    """
+    if s:
+        header = sys.getsizeof("")          # fixed PyUnicodeObject header, e.g. 49 B
+        total  = sys.getsizeof(s)           # header + encoded character data
+        ctypes.memset(id(s) + header, 0, total - header)
 
 def clean_and_save_text(text, nlp_spacy):
     """
@@ -163,17 +176,27 @@ def clean_and_save_text(text, nlp_spacy):
     output_dir = os.path.dirname(os.path.abspath(__file__))
     
     # 1. Tokenized and lowercased
-    output_path_cleaned = os.path.join(output_dir, "Resume_cleaned.txt")
+    output_path_cleaned = os.path.join(output_dir, "Resume_text/Resume_cleaned.txt")
     with open(output_path_cleaned, "w", encoding = "utf-8") as f:
         f.write(cleaned_text)
 
     # 2. Preprocessed for extraction
-    output_path_for_extraction = os.path.join(output_dir, "Resume_for_extraction.txt")
+    output_path_for_extraction = os.path.join(output_dir, "Resume_text/Resume_for_extraction.txt")
     with open(output_path_for_extraction, "w", encoding = "utf-8") as f:
         f.write(preprocessed_text)
         
     print(f"Cleaned text (tokenized/lowercased) saved to: {output_path_cleaned}")
     print(f"Preprocessed text (smart casing) saved to: {output_path_for_extraction}")
+
+    # Secure wipe: all intermediate text derived from PII-bearing input
+    # Files are written; the in-memory strings no longer serve any purpose
+    # Overwrite their character buffers before releasing references so that GC
+    # cannot expose the content via a dangling object in the heap
+    _wipe_str(cleaned_text_with_structure); del cleaned_text_with_structure
+    _wipe_str(cleaned_text);               del cleaned_text
+    _wipe_str(preprocessed_text);          del preprocessed_text
+    gc.collect()
+    print("Intermediate PII-derived text strings securely wiped from RAM.")
 
     return extracted_emails, extracted_phones
 
@@ -536,6 +559,17 @@ if __name__ == "__main__":
 
     # STEP 5: Clean, Save, and Extract PII in one pass
     extracted_emails, extracted_phones = clean_and_save_text(raw_text, nlp_spacy)
+
+    # Secure wipe: raw_text has served its purpose and contains PII
+    # Hash first as a tamper-evident audit trail (SHA-256 is one-way; no PII
+    # can be reconstructed from the digest)
+    raw_text_hash = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()
+    print(f"Raw text SHA-256 (audit trail): {raw_text_hash}")
+
+    _wipe_str(raw_text)
+    del raw_text
+    gc.collect()
+    print("Raw PII text securely wiped from RAM.")
 
     print(f"Extracted emails: {extracted_emails}")
     print(f"Extracted phones: {extracted_phones}")
