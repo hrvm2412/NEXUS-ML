@@ -8,6 +8,7 @@ import pymupdf
 import spacy
 import sys
 
+from resume_virus_scanner import scan_file_for_viruses
 from spacy.matcher import Matcher, PhraseMatcher
 from spacy.util import compile_infix_regex
 
@@ -63,10 +64,16 @@ def clean_and_save_text(text, nlp_spacy):
     locations = barangay_locations | city_locations | province_locations | region_locations | zipcode_locations
     locations.add("philippines")
 
+    # Free individual sets — merged into locations
+    del barangay_locations, city_locations, province_locations, region_locations, zipcode_locations
+    gc.collect()
+
     # PhraseMatcher for exact whole-row location matching (case-insensitive)
     # Parentheses are preserved as part of the phrase (e.g., "Adams (Pob.)", "Region I (Ilocos Region)")
     phrase_matcher = PhraseMatcher(nlp_spacy.vocab, attr="LOWER")
     phrase_matcher.add("LOCATION", [nlp_spacy.make_doc(loc) for loc in locations])
+    del locations
+    gc.collect()
 
     # Matcher for Philippine phone number patterns
     matcher = Matcher(nlp_spacy.vocab)
@@ -85,6 +92,9 @@ def clean_and_save_text(text, nlp_spacy):
             if len(line) > nlp_spacy.max_length:
                 raise LineExceedsModelLimitError
         except LineExceedsModelLimitError:
+            # Wipe matchers and partial results before exit — text (PII) is still in memory
+            del matcher, phrase_matcher, filtered_lines
+            gc.collect()
             error_response = {
                 "status" : "error",
                 "message": f"A line of text exceeds the spaCy model (en_core_web_lg) token limit and cannot be processed: '{line[:50]}'",
@@ -160,14 +170,25 @@ def clean_and_save_text(text, nlp_spacy):
         reconstructed_line = " ".join(reconstructed_line.split())
         filtered_lines.append(reconstructed_line)
 
+        # Free per-line doc after reconstruction — not needed beyond this iteration
+        del doc_spacy, redact_indices
+        gc.collect()
+
+    # Matchers no longer needed after the line loop
+    del matcher, phrase_matcher
+    gc.collect()
+
     # Join with newlines to preserve structure
     cleaned_text_with_structure = "\n".join(filtered_lines)
+    del filtered_lines
+    gc.collect()
     
     # Tokenize and lowercase for final output
-
     doc = nlp_spacy(cleaned_text_with_structure)
     cleaned_tokens = [token.text.lower() for token in doc if not token.is_space]
     cleaned_text = " ".join(cleaned_tokens)
+    del doc, cleaned_tokens
+    gc.collect()
 
     # Apply smart casing preprocessing for extraction
     preprocessed_text = preprocess_for_extraction(cleaned_text_with_structure, nlp_spacy)
@@ -237,11 +258,17 @@ def detect_resume(text, nlp):
     
     locations = barangay_locations | city_locations | province_locations | region_locations | zipcode_locations
     locations.add("philippines")
+
+    # Free individual sets — merged into locations
+    del barangay_locations, city_locations, province_locations, region_locations, zipcode_locations
+    gc.collect()
     
     # PhraseMatcher for exact whole-row location matching (case-insensitive)
     # Parentheses are preserved as part of the phrase (e.g., "Adams (Pob.)", "Region I (Ilocos Region)")
     phrase_matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
     phrase_matcher.add("LOCATION", [nlp.make_doc(loc) for loc in locations])
+    del locations
+    gc.collect()
 
     doc = nlp(text)
 
@@ -252,6 +279,8 @@ def detect_resume(text, nlp):
     matcher.add("PHONE", get_phone_patterns())
     
     has_phone = len(matcher(doc)) > 0
+    del matcher
+    gc.collect()
 
     # STEP 2: Email Detection - No preprocessing
     has_email = any(token.like_email for token in doc)
@@ -291,6 +320,8 @@ def detect_resume(text, nlp):
     
     # Count how many different headers we found
     keyword_count = len(found_keywords)
+    del header_matcher, header_matches, found_keywords
+    gc.collect()
 
     # STEP 4: Entity Density - Only locations and zipcodes are preprocessed
     entity_count    = 0
@@ -304,6 +335,8 @@ def detect_resume(text, nlp):
     # Count CSV-based location and zipcode entities via exact PhraseMatcher
     loc_matches = phrase_matcher(doc)
     entity_count += len(loc_matches)
+    del phrase_matcher, loc_matches, doc
+    gc.collect()
 
     # Scoring
     score = 0
@@ -322,8 +355,9 @@ def extract_text_from_pdf(pdf_path):
     """
     print(f"Reading resume PDF from: {pdf_path} ...")
 
+    doc = None
     try:
-        doc  = pymupdf.open(pdf_path)
+        doc       = pymupdf.open(pdf_path)
         num_pages = doc.page_count
 
         if num_pages > 2:
@@ -331,10 +365,17 @@ def extract_text_from_pdf(pdf_path):
 
         text = "\n".join(page.get_text("text") for page in doc)
         doc.close()
+        del doc
+        gc.collect()
         
         if not text.strip():
             raise ValueError
     except FileExceedsPageLimitError:
+        # Close doc before exit to release file handle
+        if doc:
+            doc.close()
+            del doc
+            gc.collect()
         error_response = {
             "status" : "error",
             "message": f"Resume PDF: {pdf_path}, exceeds page limit (2 pages maximum).",
@@ -514,6 +555,8 @@ def preprocess_for_extraction(text, nlp):
                 processed += token.text.lower() + token.whitespace_
         
         processed_lines.append(processed.strip())
+        del doc
+        gc.collect()
 
     return '\n'.join(processed_lines)
 
@@ -536,6 +579,9 @@ if __name__ == "__main__":
         sys.exit()
     print("Resume PDF found.")
 
+    # STEP 1.5: Virus Scan
+    scan_file_for_viruses(pdf_path)
+
     # STEP 2: Load Model
     nlp_spacy = load_model()
 
@@ -543,12 +589,16 @@ if __name__ == "__main__":
     raw_text = extract_text_from_pdf(pdf_path)
 
     # STEP 4: Detect Resume
+    # Wipe raw_text before exit if file is not a resume — PII must not linger
     try:
         if detect_resume(raw_text, nlp_spacy):
             print("This file is a resume.")
         else:
             raise FileNotResumeError
     except FileNotResumeError:
+        _wipe_str(raw_text)
+        del raw_text
+        gc.collect()
         error_response = {
             "status" : "error",
             "message": "This file is NOT a resume.",
@@ -558,7 +608,20 @@ if __name__ == "__main__":
         sys.exit()
 
     # STEP 5: Clean, Save, and Extract PII in one pass
-    extracted_emails, extracted_phones = clean_and_save_text(raw_text, nlp_spacy)
+    # Wrap in try/except to ensure raw_text is wiped even on unexpected errors
+    try:
+        extracted_emails, extracted_phones = clean_and_save_text(raw_text, nlp_spacy)
+    except Exception as e:
+        _wipe_str(raw_text)
+        del raw_text
+        gc.collect()
+        error_response = {
+            "status" : "error",
+            "message": f"Unexpected error during text processing: {type(e).__name__}",
+            "code"   : 107
+        }
+        print(json.dumps(error_response))
+        sys.exit()
 
     # Secure wipe: raw_text has served its purpose and contains PII
     # Hash first as a tamper-evident audit trail (SHA-256 is one-way; no PII

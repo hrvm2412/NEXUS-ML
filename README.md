@@ -1,4 +1,6 @@
-# Setup Guide (Windows 11)
+# NEXUS-ML (Job Extraction and Job Matching using Resume and Job Posting)
+
+## Setup Guide (Windows 11)
 
 ## Prerequisites
 
@@ -26,5 +28,7 @@ python -m venv .env
 pip install -r requirements.txt
 ```
 
-## Updated Usage
+## Updated Functions (Ninth Commit)
+
+
 

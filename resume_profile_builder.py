@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import sys
@@ -10,14 +11,14 @@ OCCUPATION_TITLES: list[tuple[str, int]] = [
 ]
 
 def build_profile_text(
-  education_degree : str,
-  occupation_titles: list[tuple[str, int]],
-  skills           : list[str],
-  knowledge        : list[str],
-) -> str           : 
+    education_degree : str,
+    occupation_titles: list[tuple[str, int]],
+    skills           : list[str],
+    knowledge        : list[str],
+) -> str:
     occupation_part       = format_occupation_sentence(occupation_titles)
     skills_knowledge_part = format_skills_and_knowledge(skills, knowledge)
-
+    
     return f"{education_degree}. {occupation_part}. {skills_knowledge_part}."
 
 def extract_texts(entries: list[dict]) -> list[str]:
@@ -38,20 +39,29 @@ def load_json(filepath: str) -> dict:
         return json.load(f)
 
 def parse_profile(filepath: str) -> str:
-    data = load_json(filepath)
-
+    data      = load_json(filepath)
     skills    = extract_texts(data.get("skills", []))
     knowledge = extract_texts(data.get("knowledge", []))
 
-    return build_profile_text(
+    # data no longer needed once skills and knowledge are extracted
+    del data
+    gc.collect()
+
+    profile = build_profile_text(
         education_degree  = EDUCATION_DEGREE,
         occupation_titles = OCCUPATION_TITLES,
         skills            = skills,
         knowledge         = knowledge,
     )
 
-if __name__     == "__main__":
-    filepath      = "Extracted_skills_knowledge/Resume_skills_knowledge.json"
+    # skills and knowledge lists no longer needed after profile is built
+    del skills, knowledge
+    gc.collect()
+
+    return profile
+
+if __name__ == "__main__":
+    filepath = "Extracted_skills_knowledge/Resume_skills_knowledge.json"
 
     try:
         if not os.path.exists(filepath):
@@ -65,7 +75,7 @@ if __name__     == "__main__":
         print(json.dumps(error_response))
         sys.exit()
 
-    profile_text  = parse_profile(filepath)
+    profile_text = parse_profile(filepath)
 
     output_dir  = "Profile_text"
     output_file = os.path.join(output_dir, "resume_profile.txt")

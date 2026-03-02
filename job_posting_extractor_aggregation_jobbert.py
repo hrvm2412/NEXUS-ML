@@ -83,6 +83,10 @@ def download_model_if_needed(model_path, model_id):
             model.save_pretrained(model_path)
             tokenizer.save_pretrained(model_path)
             print(f"✓ Model downloaded and saved to {model_path}")
+
+            # Free download objects — local files are the source of truth from here
+            del model, tokenizer
+            gc.collect()
         except Exception as e:
             error_response = {
                 "status" : "error",
@@ -304,7 +308,8 @@ if __name__ == "__main__":
             current_pos += len(line_text) + 1
             line_starts.append(current_pos)
         
-        window_line_nums = [i + 1 for i in window_lines_indices]
+        window_line_nums = [i + 1 for i in range(window_start, window_end)]
+        del window_lines_text, current_pos
 
         skill_within_limit    , skill_token_count     = check_token_limit(combined_text, skill_tokenizer, MAX_TOKENS)
         knowledge_within_limit, knowledge_token_count = check_token_limit(combined_text, knowledge_tokenizer, MAX_TOKENS)
@@ -316,7 +321,7 @@ if __name__ == "__main__":
                 "code"   : 403
             }
             print(json.dumps(error_response))
-            sys.exit()
+            sys.exit(1)
         
         # 5. Extract Skills & Knowledge
         skill_results = skill_extractor(combined_text)
@@ -325,7 +330,7 @@ if __name__ == "__main__":
         merged_skills = split_entities_by_separators(merged_skills, combined_text)
         merged_skills = filter_by_confidence(merged_skills, CONFIDENCE_THRESHOLD)
         
-        for entity in merged_skills:
+        for entity in skill_results:
             cleaned_text = clean_entity_text(entity['text'])
             if cleaned_text and is_valid_entity(cleaned_text):
                 capitalized_text = capitalize_words(cleaned_text)
@@ -338,7 +343,10 @@ if __name__ == "__main__":
                         'score': float(entity['score']),
                         'line' : primary_line
                     })
-        
+
+        del skill_results
+        gc.collect()
+
         knowledge_results = knowledge_extractor(combined_text)
         merged_knowledge  = merge_bio_entities(knowledge_results, combined_text)
         merged_knowledge  = merge_adjacent_entities(merged_knowledge, combined_text)
@@ -404,6 +412,6 @@ if __name__ == "__main__":
             "code"   : 404
         }
         print(json.dumps(error_response))
-        sys.exit()
+        sys.exit(1)
 
     print("Extraction complete!")

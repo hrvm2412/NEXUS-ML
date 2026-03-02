@@ -1,4 +1,5 @@
 import torch
+import gc
 import os
 import sys
 import json
@@ -118,6 +119,10 @@ def download_model_if_needed(model_path, model_id):
             model.save_pretrained(model_path)
             tokenizer.save_pretrained(model_path)
             print(f"✓ Model downloaded and saved to {model_path}")
+
+            # Free download objects — local files are the source of truth from here
+            del model, tokenizer
+            gc.collect()
         except Exception as e:
             error_response = {
                 "status" : "error",
@@ -397,7 +402,7 @@ if __name__ == "__main__":
         )
         
         # Load tokenizers separately for token counting
-        skill_tokenizer = AutoTokenizer.from_pretrained(SKILL_MODEL_PATH)
+        skill_tokenizer     = AutoTokenizer.from_pretrained(SKILL_MODEL_PATH)
         knowledge_tokenizer = AutoTokenizer.from_pretrained(KNOWLEDGE_MODEL_PATH)
         
         print("Models loaded successfully from local storage.")
@@ -413,6 +418,10 @@ if __name__ == "__main__":
     # Get the maximum number of tokens (usually 512 for BERT)
     # We take the minimum of both models to ensure safety, though they are likely identical
     MAX_TOKENS = min(skill_tokenizer.model_max_length, knowledge_tokenizer.model_max_length)
+
+    # Tokenizers only needed for MAX_TOKENS — free them before the extraction loop
+    del skill_tokenizer, knowledge_tokenizer
+    gc.collect()
 
     # Print configuration details for debugging/logging
     print(f"Model max tokens: {MAX_TOKENS}")
@@ -472,11 +481,12 @@ if __name__ == "__main__":
             line_starts.append(current_pos)
         
         # Convert computer counting (0, 1, 2) to human counting (1, 2, 3) for the final report
-        window_line_nums = [i + 1 for i in window_lines_indices]
+        window_line_nums = [i + 1 for i in range(window_start, window_end)]
+        del window_lines_text, current_pos
 
         # Check token limits
-        skill_within_limit    , skill_token_count     = check_token_limit(combined_text, skill_tokenizer, MAX_TOKENS)
-        knowledge_within_limit, knowledge_token_count = check_token_limit(combined_text, knowledge_tokenizer, MAX_TOKENS)
+        skill_within_limit    , skill_token_count     = check_token_limit(combined_text, skill_extractor.tokenizer, MAX_TOKENS)
+        knowledge_within_limit, knowledge_token_count = check_token_limit(combined_text, knowledge_extractor.tokenizer, MAX_TOKENS)
         
         if not skill_within_limit or not knowledge_within_limit:
             error_response = {
@@ -491,15 +501,15 @@ if __name__ == "__main__":
         # 5.1 Run the NER model on the text to find potential skills
         skill_results = skill_extractor(combined_text)
         # 5.2 Combine 'Begin' and 'Inside' tags (BIO scheme) into full words/phrases
-        merged_skills = merge_bio_entities(skill_results, combined_text)
+        skill_results = merge_bio_entities(skill_results, combined_text)
         # 5.3 Connect adjacent entities that should be one (e.g., "Machine" + "Learning")
-        merged_skills = merge_adjacent_entities(merged_skills, combined_text)
+        skill_results = merge_adjacent_entities(skill_results, combined_text)
         # 5.4 Split entities that accidentally include commas (e.g., "Python, Java")
-        merged_skills = split_entities_by_separators(merged_skills, combined_text)
+        skill_results = split_entities_by_separators(skill_results, combined_text)
         # 5.5 Remove weak predictions below our confidence threshold
-        merged_skills = filter_by_confidence(merged_skills, CONFIDENCE_THRESHOLD)
+        skill_results = filter_by_confidence(skill_results, CONFIDENCE_THRESHOLD)
         
-        for entity in merged_skills:
+        for entity in skill_results:
             # Clean up punctuation (e.g., remove trailing commas)
             cleaned_text = clean_entity_text(entity['text'])
             
@@ -521,15 +531,18 @@ if __name__ == "__main__":
                         'score': float(entity['score']),
                         'line' : primary_line
                     })
+
+        del skill_results
+        gc.collect()
         
-        # Extract Knowledge (same startup process as skills)
+        # Extract Knowledge (same pipeline as skills)
         knowledge_results = knowledge_extractor(combined_text)
-        merged_knowledge  = merge_bio_entities(knowledge_results, combined_text)
-        merged_knowledge  = merge_adjacent_entities(merged_knowledge, combined_text)
-        merged_knowledge  = split_entities_by_separators(merged_knowledge, combined_text)
-        merged_knowledge  = filter_by_confidence(merged_knowledge, CONFIDENCE_THRESHOLD)
+        knowledge_results = merge_bio_entities(knowledge_results, combined_text)
+        knowledge_results = merge_adjacent_entities(knowledge_results, combined_text)
+        knowledge_results = split_entities_by_separators(knowledge_results, combined_text)
+        knowledge_results = filter_by_confidence(knowledge_results, CONFIDENCE_THRESHOLD)
         
-        for entity in merged_knowledge:
+        for entity in knowledge_results:
             cleaned_text = clean_entity_text(entity['text'])
             if cleaned_text and is_valid_entity(cleaned_text):
                 capitalized_text = capitalize_words(cleaned_text)
@@ -543,6 +556,13 @@ if __name__ == "__main__":
                         'score': float(entity['score']),
                         'line' : primary_line
                     })
+
+        del knowledge_results, combined_text, line_starts, window_line_nums
+        gc.collect()
+
+    # Pipelines and source lines no longer needed after the extraction loop
+    del skill_extractor, knowledge_extractor, lines, processed_entities
+    gc.collect()
 
     # 6. Global Deduplication
     # First, remove exact duplicates (same text) across the whole file

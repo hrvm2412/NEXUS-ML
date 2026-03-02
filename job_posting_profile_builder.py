@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import sys
@@ -7,11 +8,11 @@ EDUCATION_DEGREE_REQUIRED: str             = "Bachelor of Science in Electronics
 OCCUPATION_TITLE         : tuple[str, int] = ("Electronics Engineer", 2)                       # (title, years of experience required)
 
 def build_posting_text(
-  education_degree: str,
-  occupation_title: tuple[str, int],
-  skills          : list[str],
-  knowledge       : list[str],
-) -> str          : 
+    education_degree: str,
+    occupation_title: tuple[str, int],
+    skills          : list[str],
+    knowledge       : list[str],
+) -> str:
     education_part        = format_education_sentence(education_degree)
     occupation_part       = format_occupation_sentence(*occupation_title)
     skills_knowledge_part = format_skills_and_knowledge(skills, knowledge)
@@ -38,20 +39,29 @@ def load_json(filepath: str) -> dict:
         return json.load(f)
 
 def parse_posting(filepath: str) -> str:
-    data = load_json(filepath)
-
+    data      = load_json(filepath)
     skills    = extract_texts(data.get("skills", []))
     knowledge = extract_texts(data.get("knowledge", []))
 
-    return build_posting_text(
+    # data no longer needed once skills and knowledge are extracted
+    del data
+    gc.collect()
+
+    posting = build_posting_text(
         education_degree = EDUCATION_DEGREE_REQUIRED,
         occupation_title = OCCUPATION_TITLE,
         skills           = skills,
         knowledge        = knowledge,
     )
 
-if __name__     == "__main__":
-    filepath      = "Extracted_skills_knowledge/Job_posting_skills_knowledge.json"
+    # skills and knowledge lists no longer needed after posting is built
+    del skills, knowledge
+    gc.collect()
+
+    return posting
+
+if __name__ == "__main__":
+    filepath = "Extracted_skills_knowledge/Job_posting_skills_knowledge.json"
 
     try:
         if not os.path.exists(filepath):
@@ -65,7 +75,7 @@ if __name__     == "__main__":
         print(json.dumps(error_response))
         sys.exit()
 
-    posting_text  = parse_posting(filepath)
+    posting_text = parse_posting(filepath)
 
     output_dir  = "Profile_text"
     output_file = os.path.join(output_dir, "job_posting_profile.txt")

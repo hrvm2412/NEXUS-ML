@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 from resume_text_detector_cleaner import clean_and_save_text, detect_resume, FileNotResumeError
+from resume_virus_scanner import scan_file_for_viruses
 from spacy.util import compile_infix_regex
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
@@ -55,6 +56,136 @@ def ensure_tesseract_installed():
     }
     print(json.dumps(error_response))
     sys.exit()
+
+def extract_text_from_image_ocr(file_path):
+    """
+    Extract text from a PDF or Image file using OCR (Tesseract via PyMuPDF)
+    """
+    # Check if Tesseract is installed; install it automatically if missing
+    ensure_tesseract_installed()
+
+    # Check and set TESSDATA_PREFIX if not set (Helps PyMuPDF find language files on Linux)
+    if "TESSDATA_PREFIX" not in os.environ:
+        possible_paths = ["/usr/share/tesseract/tessdata", "/usr/local/share/tessdata"]
+        for p in possible_paths:
+            if os.path.exists(p):
+                os.environ["TESSDATA_PREFIX"] = p
+                print(f"TESSDATA_PREFIX set to: {p}")
+                break
+
+    print(f"Reading file for OCR: {file_path} ...")
+
+    # Preprocess image files with the document filter before OCR
+    tmp_path = None
+    ext      = os.path.splitext(file_path)[1].lower()
+    if ext in IMAGE_EXTENSIONS:
+        tmp_path  = preprocess_image_document_filter(file_path)
+        ocr_path  = tmp_path
+    else:
+        ocr_path  = file_path
+
+    full_text = ""
+    try:
+        doc = pymupdf.open(ocr_path)
+        print("Performing OCR extraction (this requires Tesseract installed) ...")
+
+        for i, page in enumerate(doc):
+            try:
+                # Create a TextPage with OCR enabled
+                # flags = 3: Preserves ligatures and whitespace
+                # dpi = 300: Standard resolution for OCR
+                # full = True: Scans the entire page content as an image
+                textpage = page.get_textpage_ocr(flags = 3, language='eng', dpi = 300, full = True)
+                
+                # Extract text from the OCR'd textpage
+                # "text" mode preserves visual line breaks as '\n' characters
+                page_text  = page.get_text("text", textpage = textpage)
+                full_text += page_text + "\n"
+                
+                line_count = len(page_text.splitlines())
+                print(f"Processed page {i+1}/{len(doc)}: Extracted {line_count} lines (formatting preserved)")
+
+                # Secure wipe: clear per-page text immediately after accumulation
+                _wipe_str(page_text)
+                del page_text, textpage
+                gc.collect()
+
+            except Exception as e:
+                # Wipe any partially accumulated OCR text before exit
+                _wipe_str(full_text)
+                del full_text
+                gc.collect()
+                error_response = {
+                    "status" : "error",
+                    "message": f"OCR failed for page {i+1}: {str(e)}",
+                    "code"   : 204
+                }
+                print(json.dumps(error_response))
+                sys.exit()
+
+        doc.close()
+        del doc
+        gc.collect()
+    except Exception as e:
+        # Wipe any partially accumulated OCR text before exit
+        _wipe_str(full_text)
+        del full_text
+        gc.collect()
+        error_response = {
+            "status" : "error",
+            "message": f"Error opening or processing file: {str(e)}",
+            "code"   : 205
+        }
+        print(json.dumps(error_response))
+        sys.exit()
+    finally:
+        # Clean up preprocessed temp file if one was created
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+            print("Temp preprocessed image removed.")
+
+    if not full_text.strip():
+        error_response = {
+            "status" : "error",
+            "message": f"File: {file_path}, no text could be extracted via OCR.",
+            "code"   : 206
+        }
+        print(json.dumps(error_response))
+        sys.exit()
+
+    # Limit extremely long text to prevent spaCy memory errors
+    if len(full_text) > 1000000:
+        full_text = full_text[:1000000]
+
+    return full_text
+
+def load_model():
+    """
+    Loads the spaCy model with error handling.
+    spaCy: For general English NLP tasks (email, URL, phone patterns, and NER)
+    """
+    print("Loading spaCy model (en_core_web_lg) ...")
+    try:
+        nlp = spacy.load("en_core_web_lg")
+    except OSError:
+        error_response = {
+            "status" : "error",
+            "message": "spaCy Model 'en_core_web_lg' Not Found.",
+            "code"   : 201
+        }
+        print(json.dumps(error_response))
+        sys.exit()
+    else:
+        print("spaCy model loaded.")
+
+    # Remove the '/' infix splitting rule from the tokenizer
+    modified_infixes = [p for p in nlp.Defaults.infixes if '/' not in p]
+    nlp.tokenizer.infix_finditer = compile_infix_regex(modified_infixes).finditer
+    del modified_infixes
+    gc.collect()
+    print("Tokenizer updated: slash-separated terms will be kept as single tokens.")
+
+    return nlp
 
 def preprocess_image_document_filter(file_path):
     """
@@ -117,10 +248,14 @@ def preprocess_image_document_filter(file_path):
 
     # 2. Grayscale
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _wipe_ndarray(img); del img
+    gc.collect()
 
     # 3. Denoise
     # h = 10: filter strength; templateWindowSize = 7, searchWindowSize = 21 are standard
     denoised = cv2.fastNlMeansDenoising(gray, h = 10, templateWindowSize = 7, searchWindowSize = 21)
+    _wipe_ndarray(gray); del gray
+    gc.collect()
 
     # 4. Deskew via Hough line detection
     # Edge to Hough lines to median angle to affine rotation
@@ -129,6 +264,10 @@ def preprocess_image_document_filter(file_path):
         edges, rho = 1, theta = np.pi / 180, threshold = 100,
         minLineLength = 100, maxLineGap = 10
         )
+    # edges no longer needed once lines are extracted
+    del edges
+    gc.collect()
+
     if lines is not None:
         angles = []
         for line in lines:
@@ -153,6 +292,9 @@ def preprocess_image_document_filter(file_path):
                     borderMode = cv2.BORDER_REPLICATE   # fill borders with edge pixels
                 )
 
+    del lines
+    gc.collect()
+
     # 5. Adaptive threshold (document binarization)
     # Gaussian-weighted neighbourhood handles shadows and uneven scan lighting,
     # blockSize = 31: Large enough for gradual lighting gradients
@@ -164,6 +306,9 @@ def preprocess_image_document_filter(file_path):
         blockSize      = 31,
         C              = 15
     )
+    # denoised no longer needed after binarization
+    _wipe_ndarray(denoised); del denoised
+    gc.collect()
 
     # 6. Save to a named temp PNG
     tmp_file = tempfile.NamedTemporaryFile(suffix = ".png", delete = False)
@@ -173,133 +318,12 @@ def preprocess_image_document_filter(file_path):
     cv2.imwrite(tmp_path, binarized)
     print(f"Preprocessed image saved to temp file: {tmp_path}")
 
-    # Secure wipe: zero every pixel buffer now that the file is written
-    # All image data (uploaded + all intermediate arrays) is wiped from RAM
-    _wipe_ndarray(img);       del img
-    _wipe_ndarray(gray);      del gray
-    _wipe_ndarray(denoised);  del denoised
+    # Secure wipe: zero binarized buffer now that the file is written
     _wipe_ndarray(binarized); del binarized
     gc.collect()
     print("Image pixel buffers securely wiped from RAM.")
 
     return tmp_path
-
-def extract_text_from_image_ocr(file_path):
-    """
-    Extract text from a PDF or Image file using OCR (Tesseract via PyMuPDF)
-    """
-    # Check if Tesseract is installed; install it automatically if missing
-    ensure_tesseract_installed()
-
-    # Check and set TESSDATA_PREFIX if not set (Helps PyMuPDF find language files on Linux)
-    if "TESSDATA_PREFIX" not in os.environ:
-        possible_paths = ["/usr/share/tesseract/tessdata", "/usr/local/share/tessdata"]
-        for p in possible_paths:
-            if os.path.exists(p):
-                os.environ["TESSDATA_PREFIX"] = p
-                print(f"TESSDATA_PREFIX set to: {p}")
-                break
-
-    print(f"Reading file for OCR: {file_path} ...")
-
-    # Preprocess image files with the document filter before OCR
-    tmp_path = None
-    ext      = os.path.splitext(file_path)[1].lower()
-    if ext in IMAGE_EXTENSIONS:
-        tmp_path  = preprocess_image_document_filter(file_path)
-        ocr_path  = tmp_path
-    else:
-        ocr_path  = file_path
-
-    full_text = ""
-    try:
-        doc = pymupdf.open(ocr_path)
-        print("Performing OCR extraction (this requires Tesseract installed) ...")
-
-        for i, page in enumerate(doc):
-            try:
-                # Create a TextPage with OCR enabled
-                # flags = 3: Preserves ligatures and whitespace
-                # dpi = 300: Standard resolution for OCR
-                # full = True: Scans the entire page content as an image
-                textpage = page.get_textpage_ocr(flags = 3, language='eng', dpi = 300, full = True)
-                
-                # Extract text from the OCR'd textpage
-                # "text" mode preserves visual line breaks as '\n' characters
-                page_text  = page.get_text("text", textpage = textpage)
-                full_text += page_text + "\n"
-                
-                line_count = len(page_text.splitlines())
-                print(f"Processed page {i+1}/{len(doc)}: Extracted {line_count} lines (formatting preserved)")
-
-                # Secure wipe: clear per-page text immediately after accumulation
-                _wipe_str(page_text)
-                del page_text
-
-            except Exception as e:
-                error_response = {
-                    "status" : "error",
-                    "message": f"OCR failed for page {i+1}: {str(e)}",
-                    "code"   : 204
-                }
-                print(json.dumps(error_response))
-                sys.exit()
-
-        doc.close()
-    except Exception as e:
-        error_response = {
-            "status" : "error",
-            "message": f"Error opening or processing file: {str(e)}",
-            "code"   : 205
-        }
-        print(json.dumps(error_response))
-        sys.exit()
-    finally:
-        # Clean up preprocessed temp file if one was created
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
-            print("Temp preprocessed image removed.")
-
-    if not full_text.strip():
-        error_response = {
-            "status" : "error",
-            "message": f"File: {file_path}, no text could be extracted via OCR.",
-            "code"   : 206
-        }
-        print(json.dumps(error_response))
-        sys.exit()
-
-    # Limit extremely long text to prevent spaCy memory errors
-    if len(full_text) > 1000000:
-        full_text = full_text[:1000000]
-
-    return full_text
-
-def load_model():
-    """
-    Loads the spaCy model with error handling.
-    spaCy: For general English NLP tasks (email, URL, phone patterns, and NER)
-    """
-    print("Loading spaCy model (en_core_web_lg) ...")
-    try:
-        nlp = spacy.load("en_core_web_lg")
-    except OSError:
-        error_response = {
-            "status" : "error",
-            "message": "spaCy Model 'en_core_web_lg' Not Found.",
-            "code"   : 201
-        }
-        print(json.dumps(error_response))
-        sys.exit()
-    else:
-        print("spaCy model loaded.")
-
-    # Remove the '/' infix splitting rule from the tokenizer
-    modified_infixes = [p for p in nlp.Defaults.infixes if '/' not in p]
-    nlp.tokenizer.infix_finditer = compile_infix_regex(modified_infixes).finditer
-    print("Tokenizer updated: slash-separated terms will be kept as single tokens.")
-
-    return nlp
 
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -321,6 +345,9 @@ if __name__ == "__main__":
         print(json.dumps(error_response))
         sys.exit()
 
+    # STEP 1.5: Virus Scan
+    scan_file_for_viruses(input_path)
+
     # STEP 2: Load Model
     nlp = load_model()
 
@@ -328,12 +355,16 @@ if __name__ == "__main__":
     raw_text = extract_text_from_image_ocr(input_path)
 
     # STEP 4: Detect Resume
+    # Wipe raw_text before exit if file is not a resume — PII must not linger
     try:
         if detect_resume(raw_text, nlp):
             print("This file is a resume.")
         else:
             raise FileNotResumeError
     except FileNotResumeError:
+        _wipe_str(raw_text)
+        del raw_text
+        gc.collect()
         error_response = {
             "status" : "error",
             "message": "This file is NOT a resume.",
@@ -343,7 +374,20 @@ if __name__ == "__main__":
         sys.exit()
 
     # STEP 5: Clean, Save, and Extract PII in one pass (Only if it is a resume)
-    extracted_emails, extracted_phones = clean_and_save_text(raw_text, nlp)
+    # Wrap in try/except to ensure raw_text is wiped even on unexpected errors
+    try:
+        extracted_emails, extracted_phones = clean_and_save_text(raw_text, nlp)
+    except Exception as e:
+        _wipe_str(raw_text)
+        del raw_text
+        gc.collect()
+        error_response = {
+            "status" : "error",
+            "message": f"Unexpected error during text processing: {type(e).__name__}",
+            "code"   : 208
+        }
+        print(json.dumps(error_response))
+        sys.exit()
 
     # Secure wipe: raw_text has served its purpose and contains PII
     # Hash first as a tamper-evident audit trail
