@@ -23,7 +23,7 @@ def _wipe_ndarray(arr: np.ndarray) -> None:
     Works even if the array is not C-contiguous by forcing a contiguous view
     """
     if arr is not None and arr.size > 0:
-        flat    = np.frombuffer(arr.data, dtype=np.uint8)
+        flat    = np.frombuffer(arr.data, dtype = np.uint8)
         flat[:] = 0
 
 def _wipe_str(s: str) -> None:
@@ -95,7 +95,7 @@ def extract_text_from_image_ocr(file_path):
                 # flags = 3: Preserves ligatures and whitespace
                 # dpi = 300: Standard resolution for OCR
                 # full = True: Scans the entire page content as an image
-                textpage = page.get_textpage_ocr(flags = 3, language='eng', dpi = 300, full = True)
+                textpage = page.get_textpage_ocr(flags = 3, language = 'eng', dpi = 300, full = True)
                 
                 # Extract text from the OCR'd textpage
                 # "text" mode preserves visual line breaks as '\n' characters
@@ -285,7 +285,7 @@ def preprocess_image_document_filter(file_path):
                 print(f"Deskewing: correcting {skew_angle:.2f}° rotation ...")
                 (ch, cw)   = denoised.shape
                 center     = (cw // 2, ch // 2)
-                rot_matrix = cv2.getRotationMatrix2D(center, skew_angle, scale=1.0)
+                rot_matrix = cv2.getRotationMatrix2D(center, skew_angle, scale = 1.0)
                 denoised   = cv2.warpAffine(
                     denoised, rot_matrix, (cw, ch),
                     flags      = cv2.INTER_CUBIC,

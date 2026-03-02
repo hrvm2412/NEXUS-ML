@@ -1,7 +1,7 @@
 """
 resume_virus_scanner.py
 
-Industry-standard virus scanning for uploaded resume files (PDF and images).
+Industry-standard virus scanning for uploaded resume files (PDF and images)
 
 Engine   : ClamAV via clamd daemon (TCP or Unix socket)
            - Free, open-source, used in production by AWS, Cloudflare, etc.
@@ -14,8 +14,8 @@ Engine   : ClamAV via clamd daemon (TCP or Unix socket)
            Python binding  : pip install clamd
 
 Fail-closed policy:
-    If ClamAV is unavailable, the file is REJECTED (not silently passed).
-    This prevents an unscanned file from entering the NLP pipeline.
+    If ClamAV is unavailable, the file is REJECTED (not silently passed)
+    This prevents an unscanned file from entering the NLP pipeline
 
 Error codes (aligned with existing pipeline):
     800 : File not found before scan
@@ -151,7 +151,7 @@ def _scan_with_clamav(file_path: str) -> tuple[bool, bool]:
         socket_path = _resolve_clamav_socket()
         if socket_path:
             print(f"[ClamAV]: connecting via Unix socket: {socket_path}")
-            cd = clamd.ClamdUnixSocket(path=socket_path, timeout = CLAMAV_TIMEOUT)
+            cd = clamd.ClamdUnixSocket(path = socket_path, timeout = CLAMAV_TIMEOUT)
         else:
             print(f"[ClamAV]: connecting via TCP {CLAMAV_HOST}:{CLAMAV_PORT}")
             cd = clamd.ClamdNetworkSocket(

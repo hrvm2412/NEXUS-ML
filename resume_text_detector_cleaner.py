@@ -70,7 +70,7 @@ def clean_and_save_text(text, nlp_spacy):
 
     # PhraseMatcher for exact whole-row location matching (case-insensitive)
     # Parentheses are preserved as part of the phrase (e.g., "Adams (Pob.)", "Region I (Ilocos Region)")
-    phrase_matcher = PhraseMatcher(nlp_spacy.vocab, attr="LOWER")
+    phrase_matcher = PhraseMatcher(nlp_spacy.vocab, attr = "LOWER")
     phrase_matcher.add("LOCATION", [nlp_spacy.make_doc(loc) for loc in locations])
     del locations
     gc.collect()
@@ -265,7 +265,7 @@ def detect_resume(text, nlp):
     
     # PhraseMatcher for exact whole-row location matching (case-insensitive)
     # Parentheses are preserved as part of the phrase (e.g., "Adams (Pob.)", "Region I (Ilocos Region)")
-    phrase_matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+    phrase_matcher = PhraseMatcher(nlp.vocab, attr = "LOWER")
     phrase_matcher.add("LOCATION", [nlp.make_doc(loc) for loc in locations])
     del locations
     gc.collect()
@@ -461,7 +461,7 @@ def load_locations_from_csv(file_path):
     Works for barangays.csv, cities.csv, provinces.csv, regions.csv, and zipcodes_only.csv
     """
     locations = set()
-    with open(file_path, 'r', encoding='utf-8') as f:
+    with open(file_path, 'r', encoding = 'utf-8') as f:
         reader = csv.reader(f)
         next(reader)  # Skip header row
         for row in reader:
@@ -626,7 +626,7 @@ if __name__ == "__main__":
     # Secure wipe: raw_text has served its purpose and contains PII
     # Hash first as a tamper-evident audit trail (SHA-256 is one-way; no PII
     # can be reconstructed from the digest)
-    raw_text_hash = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()
+    raw_text_hash = hashlib.sha256(raw_text.encode("utf-8", errors = "replace")).hexdigest()
     print(f"Raw text SHA-256 (audit trail): {raw_text_hash}")
 
     _wipe_str(raw_text)

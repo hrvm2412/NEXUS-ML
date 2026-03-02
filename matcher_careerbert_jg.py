@@ -38,7 +38,7 @@ def load_model(model_id: str, local_path: Path, device: str) -> SentenceTransfor
         return SentenceTransformer(str(local_path), device = device)
     
     local_path.mkdir(parents = True, exist_ok = True)
-    loaded_model = SentenceTransformer(model_id, device=device)
+    loaded_model = SentenceTransformer(model_id, device = device)
     loaded_model.save(str(local_path))
     return loaded_model
 
