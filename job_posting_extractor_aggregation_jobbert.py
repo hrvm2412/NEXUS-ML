@@ -1,10 +1,10 @@
-import torch
-import os
-import sys
 import json
+import os
 import re
+import sys
+import torch
 
-from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
+from transformers import AutoModelForTokenClassification, AutoTokenizer, pipeline
 
 # Define local model paths
 SKILL_MODEL_PATH     = "./Models/jobbert_skill_extraction"

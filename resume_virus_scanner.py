@@ -54,14 +54,6 @@ class VirusScannerUnavailableError(Exception):
     pass
 
 # Internal helpers
-def _sha256(file_path: str) -> str:
-    """Return the SHA-256 hex digest of a file (used as audit trail only)."""
-    h = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
 def _check_file_prerequisites(file_path: str) -> None:
     """
     Pre-scan gate checks - runs before any AV engine is invoked:
@@ -180,6 +172,14 @@ def _scan_with_clamav(file_path: str) -> tuple[bool, bool]:
     except Exception as e:
         print(f"[ClamAV] scan error: {e}")
         return False, True # treat scan error as unavailable
+
+def _sha256(file_path: str) -> str:
+    """Return the SHA-256 hex digest of a file (used as audit trail only)."""
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 # Public API — the only symbol callers should import
 def scan_file_for_viruses(file_path: str) -> None:

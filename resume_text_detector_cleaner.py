@@ -455,7 +455,7 @@ def get_phone_patterns():
 
 def load_locations_from_csv(file_path):
     """
-    Loads locations and zipcodes from CSV file as exact whole-row strings.
+    Loads locations and zipcodes from CSV file as exact whole-row strings
     Parentheses are preserved as part of the location name
     (e.g., "Adams (Pob.)", "Region I (Ilocos Region)")
     Works for barangays.csv, cities.csv, provinces.csv, regions.csv, and zipcodes_only.csv
