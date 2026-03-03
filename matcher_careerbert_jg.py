@@ -1,3 +1,4 @@
+import gc
 import json
 import numpy as np
 import sys
@@ -22,21 +23,22 @@ def encode(jobbert_model: SentenceTransformer, texts: list[str], batch_size: int
 
 def find_top_matches(query_title: str, candidate_titles: list, top_k: int = 3):
     """Find the top-k most similar job titles to a given query"""
-    all_titles  = [query_title] + candidate_titles
-    embeddings  = encode(model, all_titles)
-
+    all_titles     = [query_title] + candidate_titles
+    embeddings     = encode(model, all_titles)
     query_emb      = embeddings[0:1]
     candidate_embs = embeddings[1:]
+    scores         = cos_sim(query_emb, candidate_embs)[0]
+    top_indices    = torch.argsort(scores, descending = True)[:top_k]
+    results        = [(candidate_titles[i], round(scores[i].item(), 4)) for i in top_indices]
 
-    scores      = cos_sim(query_emb, candidate_embs)[0]
-    top_indices = torch.argsort(scores, descending = True)[:top_k]
+    del embeddings, query_emb, candidate_embs, scores, top_indices
+    gc.collect()
 
-    return [(candidate_titles[i], round(scores[i].item(), 4)) for i in top_indices]
+    return results
 
 def load_model(model_id: str, local_path: Path, device: str) -> SentenceTransformer:
     if local_path.exists():
         return SentenceTransformer(str(local_path), device = device)
-    
     local_path.mkdir(parents = True, exist_ok = True)
     loaded_model = SentenceTransformer(model_id, device = device)
     loaded_model.save(str(local_path))
@@ -47,10 +49,15 @@ def truncate_to_max_tokens(jobbert_model: SentenceTransformer, text: str) -> str
     tokenizer  = jobbert_model.tokenizer
     max_tokens = jobbert_model.max_seq_length
     tokens     = tokenizer(text, truncation = True, max_length = max_tokens, return_tensors = "pt")
-    return tokenizer.decode(tokens["input_ids"][0], skip_special_tokens = True)
+    decoded    = tokenizer.decode(tokens["input_ids"][0], skip_special_tokens = True)
+
+    # tokens tensor no longer needed after decode
+    del tokens
+    gc.collect()
+
+    return decoded
 
 if __name__ == "__main__":
-
     model = load_model(MODEL_ID, LOCAL_MODEL_PATH, DEVICE)
 
     try:
@@ -80,5 +87,9 @@ if __name__ == "__main__":
 
     embeddings = encode(model, [posting_text, resume_text])
     score      = cos_sim(embeddings[0:1], embeddings[1:2])[0][0].item()
+
+    # embeddings no longer needed after score is computed
+    del embeddings
+    gc.collect()
 
     print(f"\n  Similarity Score: {round(score, 4)}")

@@ -118,7 +118,7 @@ def download_model_if_needed(model_path, model_id):
             # Save locally
             model.save_pretrained(model_path)
             tokenizer.save_pretrained(model_path)
-            print(f"✓ Model downloaded and saved to {model_path}")
+            print(f"Model downloaded and saved to {model_path}")
 
             # Free download objects — local files are the source of truth from here
             del model, tokenizer

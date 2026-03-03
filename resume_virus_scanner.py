@@ -174,7 +174,7 @@ def _scan_with_clamav(file_path: str) -> tuple[bool, bool]:
         return False, True # treat scan error as unavailable
 
 def _sha256(file_path: str) -> str:
-    """Return the SHA-256 hex digest of a file (used as audit trail only)."""
+    """Return the SHA-256 hex digest of a file (used as audit trail only)"""
     h = hashlib.sha256()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
